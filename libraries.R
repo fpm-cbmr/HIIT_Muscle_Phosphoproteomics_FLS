@@ -1,7 +1,3 @@
-#file.copy("C:/Users/bcr992/Desktop/R_script/HIIT_Phospho_Farina/renv.lock", "C:/Users/bcr992/Desktop/R_script/HIIT_Muscle_Phosphoproteomics_FLS/renv.lock", overwrite = TRUE)
-
-#renv::restore()
-
 
 library(limma)
 library(PhosR)
