@@ -1,0 +1,8 @@
+Package: HIIT_Muscle_Phosphoproteomics_FLS
+Type: Project
+Version: 0.0.1
+Imports:
+    knitr,
+    renv,
+    rmarkdown
+Encoding: UTF-8
