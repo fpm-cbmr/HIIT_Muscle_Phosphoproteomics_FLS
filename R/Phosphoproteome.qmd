@@ -1,0 +1,2107 @@
+---
+title: "Phosphoproteome"
+author: "FLS"
+format: html
+execute:
+  echo: true
+  warning: false 
+  message: false
+---
+
+```{r setup}
+source(here::here("libraries.R"))
+
+```
+
+```{r load raw data}
+
+raw <- read.delim(here::here("data-raw/20231011_161204_directDIAphospho_HIIThumanMuscle_HTRMS_version18.3_FS_collapsed_table.txt"), header = TRUE, na.strings = c("NaN"))
+
+nrow(raw)
+# 47447
+ncol(raw)
+# 189
+
+# meta data
+Info <- read_excel(here::here("data-raw/Info.xlsx"))
+
+column_order <- colnames(phospho_dataset)
+column_indices <- match(column_order, Info$label)
+Info <- Info[column_indices, ]
+
+```
+
+```{r prepare raw data}
+
+# name rows by PTM
+raw2 <- raw
+rownames(raw2) <- raw2$PTM_collapse_key
+
+# Remove QC samples
+columns_to_remove <- c("X20230825_TIMS6_EVO4_PRI_X1009_P0276_R0899_44min_DIAphospho_S01_S2.A1_1_5023", "X20230825_TIMS6_EVO4_PRI_X1009_P0276_R0899_44min_DIAphospho_S94_S2.H10_1_5116", "X20230825_TIMS6_EVO4_PRI_X1009_P0276_R0899_44min_DIAphospho_S95_S3.A1_1_5117", "X20230825_TIMS6_EVO4_PRI_X1009_P0276_R0899_44min_DIAphospho_S168_S3.G2_1_5190")
+raw_QCremoved <- raw2 %>%
+    as.matrix() %>%
+    .[, !colnames(.) %in% columns_to_remove, drop = FALSE] %>%
+    .[-1, ]
+# 47446 x 185
+
+raw_QCremoved_df <- as.data.frame(raw_QCremoved)
+
+
+```
+
+```{r QC raw data}
+
+# reliably identified sites
+valid_rows_count <- sum(rowSums(!is.na(raw_QCremoved[, 1:164])) >= 10)
+print(valid_rows_count)
+# 41430 sites identified in at least 10 samples
+
+
+# Phospho-proteins
+if ("PG.ProteinNames" %in% colnames(raw_QCremoved_df)) {
+    protein_names_column <- raw_QCremoved_df$PG.ProteinNames
+    if (!is.null(protein_names_column) && length(protein_names_column) > 0) {
+        unique_protein_names_count <- length(unique(protein_names_column))
+        print(unique_protein_names_count)
+    } else {
+        print("Column 'PG.ProteinNames' is empty.")
+    }
+} else {
+    print("Column 'PG.ProteinNames' not found in the dataframe.")
+}
+# 3.500
+
+
+# missing values per sample
+print(colCounts(raw_QCremoved[, 1:164], value = NA))
+
+
+# detected sites per sample
+detected_sites <- colSums(!is.na(raw_QCremoved[, 1:164]))
+detected_sites <- as.data.frame(detected_sites)
+detected_sites$samples <- row.names(detected_sites)
+average_sites_per_sample <- detected_sites %>%
+    summarise(avg_sites = mean(detected_sites, na.rm = TRUE),
+              std_dev = sd(detected_sites, na.rm = TRUE))
+print(average_sites_per_sample)
+# avg_sites 19503.18, std_dev 1995.133
+ggplot(data = detected_sites, aes(x = samples, y = detected_sites)) +
+    geom_bar(stat = "identity", fill = "lightblue3") +
+    labs(title = "Sites per Sample", x = "Sample", y = "Sites detected") +
+    theme(axis.text.x = element_text(size = 2, angle = 40, hjust = 1)) +  
+    geom_hline(yintercept = average_sites_per_sample$avg_sites,
+               linetype = "dashed", color = "maroon3") +  
+    geom_text(aes(x = 1, y = average_sites_per_sample$avg_sites + 5),
+              label = paste("Avg:", round(average_sites_per_sample$avg_sites, 2)),
+              color = "maroon2", vjust = 1, hjust = 0) +
+    geom_text(aes(x = 1, y = average_sites_per_sample$avg_sites - average_sites_per_sample$std_dev - 10),
+              label = paste("SD:", round(average_sites_per_sample$std_dev, 2)),
+              color = "blue", vjust = 0, hjust = 0)
+
+
+
+
+# distribution of sites on Serine, Threonine or Tyrosine residues
+AA_counts <- table(raw_QCremoved_df$PTM_0_aa)
+print(AA_counts)
+# s: 28758   t: 13854   y: 4834
+AA <- as.data.frame(AA_counts)
+AA$Var1 <- c("Serine", "Threonine", "Tyrosine")
+ggplot(AA, aes(x="", y=Freq, fill=Var1)) +
+    geom_bar(stat="identity", width=1, color="white") +
+    geom_text(aes(label = paste(Var1, "
+    ", Freq, "sites", sep = " ")), position = position_stack(vjust = 0.5)) +
+    coord_polar("y") +
+    theme_void() +
+    scale_fill_manual(values = c("lightblue", "paleturquoise4", "turquoise4")) +
+    theme(legend.position = "none")
+AA$Percentage <- AA$Freq / sum(AA$Freq) * 100
+ggplot(AA, aes(x="", y=Percentage, fill=Var1)) +
+    geom_bar(stat="identity", width=1, color="white") +
+    geom_text(aes(label = paste(Var1, "\n", sprintf("%.2f%%", Percentage), sep=" ")), position = position_stack(vjust = 0.5)) +
+    coord_polar("y") +
+    theme_void() +
+    scale_fill_manual(values = c("lightblue", "paleturquoise4", "turquoise4")) +
+    labs(title = "PTM Site Distribution by Amino Acid") +
+    theme(legend.position = "none")
+
+
+
+# variability in raw data: coefficient of variation
+data <- raw_QCremoved_df[, 1:164] %>%
+    dplyr::mutate_all(~ as.numeric(as.character(.))) 
+cv_raw <- data |>
+    dplyr::mutate(coefficient_variation = apply(data,
+                                                1,
+                                                FUN = function(x) sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE) * 100)) |>
+    dplyr::mutate(mean_LFQ = rowMeans(data, na.rm = TRUE))
+
+median_cv <- median(cv_raw$coefficient_variation, na.rm = TRUE)
+mean_cv <- mean(cv_raw$coefficient_variation, na.rm = TRUE)
+cat("Median CV:", median_cv, "\n")
+# Median CV: 63.2869 
+cat("Mean CV:", mean_cv, "\n")
+# Mean CV: 68.13423
+
+
+
+```
+
+```{r log2}
+
+# convert NA's and log2 transform the sample columns
+log2 <- raw_QCremoved
+log2[, 1:164] <- apply(raw_QCremoved[, 1:164], 2, function(x) {
+    x <- suppressWarnings(as.numeric(x))
+    ifelse(!is.na(x) & x > 0, log2(x), NA)})
+
+# rename sample columns 
+log2_renamed <- as.data.frame(log2)
+names(log2_renamed)[1:164] <- substr(names(log2_renamed)[1:164], 61, 64)
+for (i in 1:nrow(Info)) {
+    current_col_title <- Info$Current_Column_Title[i]
+    additional_info <- Info$Group_Time_Cond_Participant[i]
+    if (current_col_title %in% names(log2_renamed)) {
+        names(log2_renamed)[which(names(log2_renamed) == current_col_title)] <- paste0(current_col_title, "-", additional_info)
+    }
+}
+
+log2_renamed[, 1:164] <- lapply(log2_renamed[, 1:164], function(x) as.numeric(as.character(x)))
+
+# order of samples
+samples_only <- log2_renamed[, 1:164]
+# IMPORTANT: check that order of samples in matrix and metadata are the same
+# first bring metadata (here: HIIT_Sample_Information in the same order as log2_QCremoved
+column_order <- colnames(samples_only)
+# match the "label" column in metadata with the column_order_DiffAnalysis
+column_indices <- match(column_order, Info$label)
+# reorder the the rows in metadata based on these indices
+Info <- Info[column_indices, ]
+
+
+```
+
+```{r QC log2 data}
+
+# check normality
+boxplot(log2_renamed[, 1:164])
+
+
+########################## FIGURE 1H ##################################
+
+# variability in log2 data: CV plot
+data <- log2_renamed[, 1:164]
+cv_log2 <- data |>
+    dplyr::mutate(coefficient_variation = apply(data,
+                                                1,
+                                                FUN = function(x) sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE) * 100)) |>
+    dplyr::mutate(mean_LFQ = rowMeans(data, na.rm = TRUE))
+median_cv <- median(cv_log2$coefficient_variation, na.rm = TRUE)
+mean_cv <- mean(cv_log2$coefficient_variation, na.rm = TRUE)
+cat("Median CV:", median_cv, "\n")
+# Median CV: 18.86599
+cat("Mean CV:", mean_cv, "\n")
+# Mean CV: 22.41851
+data_plot <- cv_log2 |>
+    tibble::rownames_to_column("Gene.name") |>
+    dplyr::mutate(perc_CVs = dplyr::case_when(
+        coefficient_variation <= 18.86599  ~ "under_median",
+        TRUE ~ "over_median"
+    ))
+#table(data_plot$perc_CVs)
+#  over_mean: 18426     under_mean:   29021
+cv <- data_plot |>
+    ggplot2::ggplot(
+        ggplot2::aes(x = mean_LFQ,
+                     y = coefficient_variation,
+                     color = perc_CVs)
+    ) +
+    ggplot2::geom_point(size = 0.5,
+                        alpha = 1,
+                        na.rm = TRUE) +
+    ggplot2::theme_classic() +
+    ggplot2::scale_color_manual(
+        values = c("plum4",
+                   "plum"
+                   )) +
+    coord_cartesian(xlim = c(0, 23), ylim = c(0, 200)) +
+    #ggplot2::annotate(
+     #   geom = "text",
+      #  x = 21,
+       # y = 39,
+    #    fontface = 1.5,
+     #   label = "18426 sites",
+      #  size = 2
+    #) +
+    ggplot2::annotate(
+        geom = "text",
+        x = 18,
+        y = 27,
+        fontface = 1.5,
+        label = "Median %CV = 18.87",
+        size = 2
+    ) +
+    #ggplot2::annotate(
+     #   geom = "text",
+      #  x = 21,
+       # y = 12,
+       # fontface = 1.5,
+        #label = "29021 sites",
+        #size = 2
+    #) +
+    ggplot2::geom_hline(
+        yintercept =18.86599,
+        linetype = "dotted",
+        colour = "black",
+        size = 0.25
+    ) +
+    ggplot2::ylab("Mean coefficient of variation (%)") +
+    ggplot2::xlab("Mean Log2 intensities") +
+    ggplot2::theme(
+        text = ggplot2::element_text(face="bold", colour="black", size = 8),
+        legend.position = "none",
+    )
+cv
+
+
+
+
+
+
+####################### FIGURE S1C ########################
+
+df <- log2_QCremoved[, 1:164]
+
+df_complete <- df[complete.cases(df), ]
+
+Info_order <- Info
+
+Info_order$Combined <- factor(Info_order$Combined, levels = c("LeanPreBasal", "LeanPreInsulin", "ObesePreBasal", "ObesePreInsulin", "T2DPreBasal", "T2DPreInsulin", "LeanPostBasal", "LeanPostInsulin", "ObesePostBasal", "ObesePostInsulin", "T2DPostBasal", "T2DPostInsulin"))
+
+# Order columns of complete based on the Combined column in Rename_basal
+order_indices <- order(Info_order$Combined[match(colnames(df_complete), Info_order$label)])
+df_complete_ordered <- df_complete[, order_indices]
+
+correlation_matrix <- cor(df_complete_ordered, method = "pearson")
+
+# Annotation for group
+Info_order$Group <- ifelse(Info_order$Group == "Lean", 1, ifelse(Info_order$Group == "Obese", 2, ifelse(Info_order$Group == "T2D", 3, Info_order$Group)))
+Info_order$Group <- as.numeric(Info_order$Group)
+annotation_group <- data.frame(Group = Info_order$Group)
+rownames(annotation_group) <- Info_order$label
+
+# Annotation for Timepoint
+Info_order$Timepoint <- ifelse(Info_order$Timepoint == "Pre", 1, ifelse(Info_order$Timepoint == "Post", 2, Info_order$Timepoint))
+Info_order$Timepoint <- as.numeric(Info_order$Timepoint)
+annotation_timepoint <- data.frame(Timepoint = Info_order$Timepoint)
+rownames(annotation_timepoint) <- Info_order$label
+
+# Annotation for Condition
+Info_order$Condition <- ifelse(Info_order$Condition == "Basal", 1, ifelse(Info_order$Condition == "Insulin", 2, Info_order$Condition))
+Info_order$Condition <- as.numeric(Info_order$Condition)
+annotation_condition <- data.frame(Condition = Info_order$Condition)
+rownames(annotation_condition) <- Info_order$label
+
+
+annotation_col <- data.frame(
+    Timepoint = annotation_timepoint,
+    Group = annotation_group,
+    Condition = annotation_condition)
+
+pheatmap(correlation_matrix,
+         color = colorRampPalette(c("lightpink", "white", "lightcyan", "lightskyblue1","lightskyblue3", "darkslateblue", "midnightblue"))(100),
+         main = "Pearson Correlation Heatmap",
+         cluster_rows = F,
+         cluster_cols = F,
+         show_rownames = F,
+         show_colnames = F,
+         scale = "none",
+         annotation_col = annotation_col,
+         annotation_colors = list(
+             Timepoint = c("1" = "plum1", "2" = "palegreen3"),
+             Group = c("1" = "deepskyblue4", "2" = "purple4", "3" = "maroon3"),
+             Condition = c("1" = "blue", "2" = "red")
+         ))
+
+
+
+pheatmap(correlation_matrix,
+         color = colorRampPalette(c("pink3" ,"lightpink1", "lightpink", "mistyrose", "white", "lightcyan", "lightskyblue1", "darkslateblue"))(100),
+         main = "Pearson Correlation Heatmap",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         scale = "none",
+         annotation_col = annotation_col,
+         annotation_colors = list(
+             Timepoint = c("1" = "plum1", "2" = "palegreen3"),
+             Group = c("1" = "deepskyblue4", "2" = "purple4", "3" = "maroon3"),
+             Condition = c("1" = "blue", "2" = "red")
+         ),
+         breaks = seq(0.75, 1, length.out = 100))
+
+
+
+
+# Exclude diagonal elements
+correlation_values <- correlation_matrix[upper.tri(correlation_matrix)]
+
+# Calculate statistics
+min_corr <- min(correlation_values)
+max_corr <- max(correlation_values)
+median_corr <- median(correlation_values)
+mean_corr <- mean(correlation_values)
+
+# Print results
+print(paste("Minimum correlation:", min_corr))
+# "Minimum correlation: 0.727313057108731"
+print(paste("Maximum correlation:", max_corr))
+# "Maximum correlation: 0.983869635208383"
+print(paste("Median correlation:", median_corr))
+#  "Median correlation: 0.937827297068043"
+print(paste("Mean correlation:", mean_corr))
+# "Mean correlation: 0.924240878340973"
+
+```
+
+
+
+```{r SPSs normalization}
+
+# load the SPSs dataset from PhosR Reference***
+SPSs <- read_excel(here::here("data-raw/SPSs_for_correction_sentbyJeppe.xlsx"))
+colnames(SPSs) <- "SPsite"
+SPSs$SPsite <- substr(SPSs$SPsite, 1, nchar(SPSs$SPsite) - 1)
+SPSs$SPsite <- gsub(";", "_", SPSs$SPsite)
+
+# make data compatible with SPSs format
+log2_samples <- log2_renamed[, 1:164]
+
+
+
+# do with imputed data and after SPSs un-impute so I have the full dataset normalized
+log2_samples_mat <- as.matrix(log2_samples)
+set.seed(12345)
+saved.state <- .Random.seed
+log2_samples_imputed <- impute.knn(as.matrix(log2_samples_mat))
+imputed_matrix <- log2_samples_imputed$data
+imputed_df <- as.data.frame(imputed_matrix)
+
+# create mask for imputed values to locate the imputed values
+imputed_mask <- (log2_samples != imputed_df)
+
+# extract phosphosite labels
+sites_imputed = rownames(imputed_df)
+sites_imputed2 <- substring(sites_imputed, 1, nchar(sites_imputed) - 3)
+
+# design matrix: one group to reduce bias
+grps1 <- Info$replicate
+design <- model.matrix(~grps1 - 1)
+
+# ctl is an integer vector denoting the position of SPSs within the quantification matrix
+SPSs_factor <- SPSs$SPsite
+ctl_imputed = which(sites_imputed2 %in% SPSs_factor)
+
+# make phosphoexperiment
+ppe <- PhosphoExperiment(assays = list(Quantification = as.matrix(imputed_df)))
+dim(ppe)
+# 47446   164
+
+# normalize data to stably phosphorylated sites
+ppe_imputed_SPSs = RUVphospho(SummarizedExperiment::assay(ppe, "Quantification"),  M = design, k = 1, ctl = ctl_imputed)
+
+grps <- gsub("^.{5}|_[0-9]{1,2}$", "", colnames(ppe_imputed_SPSs))
+
+# plot PCA with imputed data
+plotQC(ppe_imputed_SPSs, grps=grps, labels = " ", panel = "pca") +
+    ggplot2::ggtitle("Imputed, After SPSs")
+
+# extract dataframe from ppe
+imputed_SPSsnorm_df <- as.data.frame(ppe_imputed_SPSs)
+
+# Replace imputed values in the new dataframe with NA after SPSs normalization
+unimputed_SPSsnorm_df <- imputed_SPSsnorm_df
+unimputed_SPSsnorm_df[is.na(imputed_mask)] <- NA
+
+
+
+```
+
+
+```{r QC SPSs normalized data}
+
+boxplot(unimputed_SPSsnorm_df)
+
+
+# filter for 100% valid values for PCA
+complete_unimputed_SPSsnorm_df <- unimputed_SPSsnorm_df[complete.cases(unimputed_SPSsnorm_df), ]
+plotQC(complete_unimputed_SPSsnorm_df, grps=grps, labels = " ", panel = "pca") +
+    ggplot2::ggtitle("SPSs, unimputed, 100% filtered")
+
+
+complete_unimputed_SPSsnorm_df_transposed <- t(complete_unimputed_SPSsnorm_df)
+complete_unimputed_SPSsnorm_df_transposed_df <- as.data.frame(complete_unimputed_SPSsnorm_df_transposed)
+pca_object_complete_unimputed_SPSsnorm <- prcomp(complete_unimputed_SPSsnorm_df_transposed_df, scale = F)
+data_pca_complete_unimputed_SPSsnorm <- pca_object_complete_unimputed_SPSsnorm$x
+data_pca_complete_unimputed_SPSsnorm <- as.data.frame(data_pca_complete_unimputed_SPSsnorm)
+data_pca_complete_unimputed_SPSsnorm <- data_pca_complete_unimputed_SPSsnorm %>%
+    dplyr::select(PC1, PC2) %>%
+    add_column(
+        Label = Info$ID,
+        S = Info$AnalyticalSampleID,
+        Training = Info$Timepoint,
+        Clamp = Info$Condition,
+        Group = Info$Group,
+        ID = Info$ID,
+        MSBatch = as.factor(Info$MSBatch),
+        BeatboxBatch = as.factor(Info$BeatBoxBatch),
+        Participant = as.factor(Info$Participant)
+    )
+
+
+# PCA coloured by batches
+pca1 <- ggplot(
+    data_pca_complete_unimputed_SPSsnorm,
+    aes(
+        x = PC1,
+        y = PC2,
+        shape = MSBatch,
+        names = ID,
+        color = BeatboxBatch
+    )
+) +
+    geom_point(size = 2) +
+    scale_color_manual(values = c("plum2", "hotpink", "violetred", "dodgerblue3", "turquoise2", "deepskyblue3", "mediumorchid")) +
+    stat_ellipse(aes(color = BeatboxBatch), geom = "path", size = 0.3) +  
+    theme_light() +
+    ggtitle("PCA 100% filtered SPSs normalized in imputed data onegroup- batches") +
+    theme(plot.title = element_text(size = 16, face = "bold")) +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    theme(legend.title = element_text(size = 12, face = "bold"))
+plotly::ggplotly(pca1)
+## small batch effect so correct for Beatbox batches later on
+
+# PCA coloured by biology
+pca2 <- ggplot(
+    data_pca_complete_unimputed_SPSsnorm,
+    aes(
+        x = PC1,
+        y = PC2,
+        shape = Clamp,
+        names = ID,
+        fill = Training,
+        color = Group
+    )
+) +
+    geom_point(size = 2) +
+    scale_fill_manual(values = c("Pre" = "white", "Post" = "grey")) +
+    scale_color_manual(values = c("dodgerblue", "deeppink", "purple")) +
+    theme_classic() +
+    ggtitle("PCA 100% filtered SPSs normalized on imputed data onegroup - groups") +
+    theme(plot.title = element_text(size = 16, face = "bold")) +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    theme(legend.title = element_text(size = 12, face = "bold"))
+plotly::ggplotly(pca2)
+
+# plot the Eigenvalues (% of variances explained by each component)
+fviz_eig(pca_object_complete_unimputed_SPSsnorm,
+         addlabels = T
+) +
+    theme_light() +
+    ggtitle("Eigenvalues SPSs normalized on imputed data, 100% filtered") +
+    theme(plot.title = element_text(size = 16, face = "bold")) +
+    theme(plot.title = element_text(hjust = 0.5))
+
+
+
+
+```
+
+
+```{r filter}
+# filter for 25% valid values
+filt <- selectOverallPercent(unimputed_SPSsnorm_df, 0.25)
+# 27216 sites
+
+```
+
+```{r batch correction}
+
+# Generate a SummarizedExperiment object using metadata
+PhosphoSE <- PhosphoExperiment(assay = filt, colData= Info)
+PCA_MS_raw <- plotMDS(assay(PhosphoSE), labels = PhosphoSE$BeatBoxBatch, main = "PCA before batch correction - SPSs normalized filtered")
+PhosphoSE_BB <- PhosphoSE
+assay(PhosphoSE_BB) <- removeBatchEffect(assay(PhosphoSE_BB), batch = PhosphoSE_BB$BeatBoxBatch)
+plotMDS(assay(PhosphoSE_BB), labels = PhosphoSE_BB$BeatBoxBatch, main = "PCA after batch correction - SPSs normalized & filtered")
+
+# extract dataset
+phospho_dataset <- as.data.frame(assay(PhosphoSE_BB))
+
+
+```
+
+
+```{r QC batch corrected data}
+
+df <- phospho_dataset
+
+########################### FIGURE 1J & FIGURE S1E ###########################
+
+# PCA on 100% filtered data
+complete_df <- df[complete.cases(df), ]
+complete_df_transposed <- t(complete_df)
+complete_df_transposed_df <- as.data.frame(complete_df_transposed)
+pca_object_complete <- prcomp(complete_df_transposed_df, scale = F)
+data_pca_complete <- pca_object_complete$x
+data_pca_complete <- as.data.frame(data_pca_complete)
+Info$TrainingClamp <- paste(Info$Timepoint, Info$Condition, sep = "")
+Info$GroupTimepoint <- paste(Info$Group, Info$Timepoint, sep = "_")
+data_pca_complete <- data_pca_complete |>
+    dplyr::select(PC1, PC2) |>
+    add_column(
+        Label = Info$ID,
+        S = Info$AnalyticalSampleID,
+        Training = Info$Timepoint,
+        Clamp = Info$Condition,
+        TrainingClamp = Info$TrainingClamp,
+        GroupTimepoint = Info$GroupTimepoint,
+        Group = Info$Group,
+        ID = Info$ID,
+        MSBatch = as.factor(Info$MSBatch),
+        BeatboxBatch = as.factor(Info$BeatBoxBatch),
+        Participant = as.factor(Info$Participant)
+    )
+fviz_eig(pca_object_complete,
+         addlabels = T
+) +
+    theme_light() +
+    ggtitle("Eigenvalues 100% filtered") +
+    theme(plot.title = element_text(size = 16, face = "bold")) +
+    theme(plot.title = element_text(hjust = 0.5))
+
+x_limits <- c(-30, 30)
+y_limits <- c(-20, 20)
+
+
+## supplementary PCA with insulin/basal
+pca_complete <- ggplot(
+    data_pca_complete,
+    aes(
+        x = PC1,
+        y = PC2,
+        color = Group,
+        shape = TrainingClamp
+    )
+) +
+    geom_point(size = 3) +
+    scale_shape_manual(values = c(1, 16, 2, 17)) +
+    scale_color_manual(values = c(
+        "Lean" = "deepskyblue3",
+        "Obese" = "mediumpurple4",
+        "T2D" = "magenta3"
+    )) +
+    theme_classic() +
+    theme(panel.background = element_rect(fill = "white"),  
+          axis.line = element_line(color = "black"),  
+          panel.grid.major = element_line(color = "white"),  
+          axis.text.x = element_text(size = 6, angle = 0, hjust = 0),  
+          axis.text.y = element_text(size = 6, angle = 0, hjust = 0),  
+          axis.title.x = element_text(margin = margin(t = 2)), 
+          axis.title.y = element_text(margin = margin(r = 2)),  
+          text = element_text(size = 6),
+          legend.position = "none") +
+    labs(x = "PC 1 (15.9 %)", y = "PC 2 (7 %)")+
+    coord_cartesian(xlim = x_limits, ylim = y_limits)
+pca_complete
+
+
+
+# PCA main figure
+pca_main <- ggplot(
+    data_pca_complete,
+    aes(
+        x = PC1,
+        y = PC2,
+        shape = Training,
+        color = Group,
+        fill = GroupTimepoint
+    )
+) +
+    geom_point(aes(color = Group), size = 0.5) +  
+    scale_shape_manual(values = c(19, 2)) +
+    scale_fill_manual(values = c("Lean_Pre" = "white", "Lean_Post" = "deepskyblue3", "Obese_Pre" = "white", "Obese_Post" = "mediumpurple4", "T2D_Pre" = "white", "T2D_Post" = "magenta3")) +
+    scale_color_manual(values = c("deepskyblue3", "mediumpurple4", "magenta3")) +
+    stat_ellipse(aes(linetype = Training), color = "grey30", geom = "polygon", type = "norm", fill = NA, size = 0.3) +
+    scale_linetype_manual(values = c("solid", "dotted")) +
+    theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    theme(panel.background = element_rect(fill = "white"),  
+          axis.line = element_line(color = "black"),  
+          panel.grid.major = element_line(color = "white"),  
+          axis.text.x = element_text(size = 6, angle = 0, hjust = 0),  
+          axis.text.y = element_text(size = 6, angle = 0, hjust = 0), 
+          axis.title.x = element_text(margin = margin(t = 2)), 
+          axis.title.y = element_text(margin = margin(r = 2)),
+          text = element_text(size = 6),
+          legend.position = "none") +
+    labs(x = "PC 1 (15.9 %)", y = "PC 2 (7 %)")
+pca_main
+
+
+ellipses_complete <- ggplot(
+    data_pca_complete,
+    aes(
+        x = PC1,
+        y = PC2,
+        shape = Training
+    )
+) +
+    stat_ellipse(aes(linetype = Training), color = "grey30", geom = "polygon", type = "norm", fill = NA, size = 0.3) +
+    theme_classic() +
+    theme(
+        panel.background = element_blank(),  
+        plot.background = element_blank(), 
+        axis.line = element_line(color = "black"),  
+        panel.grid.major = element_blank(),  
+        panel.grid.minor = element_blank(), 
+        axis.text.x = element_text(size = 6, angle = 0, hjust = 0),  
+        axis.text.y = element_text(size = 6, angle = 0, hjust = 0),  
+        axis.title.x = element_text(margin = margin(t = 2)),  
+        axis.title.y = element_text(margin = margin(r = 2)),  
+        text = element_text(size = 6),
+        legend.position = "none"
+    ) +
+    labs(x = "PC 1 (16 %)", y = "PC 2 (7 %)") +
+    coord_cartesian(xlim = x_limits, ylim = y_limits)
+ellipses_complete
+
+
+```
+
+```{r Phosphopeptide data}
+
+## import the uncollapsed report
+#uncollapsed <- xxx
+length(unique(uncollapsed$EG.PrecursorId))
+# number of peptides identified = 71579
+uncollapsed_phospho <- uncollapsed[grepl("Phospho",uncollapsed$EG.PrecursorId),]
+length(unique(uncollapsed_phospho$EG.PrecursorId))
+# number of Phosphopeptides identified = 60158
+
+```
+
+
+```{r Overlap proteins & phosphoproteins}
+
+#### load Global_Proteome dataset
+
+########################### FIGURE 1C #####################################
+
+# phospho gene names
+# 47.447 rows
+phosphoproteins <- unique(phospho_dataset_log2$PG.Genes)
+# 3.499
+
+# proteome
+proteins <- unique(row.names(proteome_dataset_raw))
+# 5.558
+
+overlap <- list(Proteins = proteins,
+                Phosphoproteins = phosphoproteins
+                       )
+
+venn_counts <- euler(overlap)
+
+venn.plot <- plot(
+    venn_counts,
+    counts = TRUE,
+    quantities = TRUE,
+    main = "Overlap PG.Genes",
+    fill = c("deepskyblue3", "mediumpurple1"),
+    alpha = 0.3,
+    circle.line = list(lwd = 10, col = c("deepskyblue3", "mediumpurple1"))
+)
+print(venn.plot)
+
+
+unique_to_proteins <- setdiff(proteins, phosphoproteins)
+unique_to_phosphoproteins <- setdiff(phosphoproteins, proteins) 
+overlapping_proteins <- intersect(proteins, phosphoproteins)  
+
+
+
+
+######################## FIGURE S1D ################################
+
+# ORA
+universe_genes <- union(phosphoproteins, proteins)
+# 6755
+universe_genes <- as.data.frame(universe_genes)
+
+entrez <- AnnotationDbi::mapIds(org.Hs.eg.db,
+                                keys = universe_genes$universe_genes,
+                                column = "ENTREZID",
+                                keytype = "SYMBOL")
+
+
+# Add entrez IDs to the gene list
+universe_genes <- universe_genes %>%
+    mutate(entrez_id = entrez)
+background_proteome <- universe_genes$entrez_id[!is.na(universe_genes$entrez_id) & universe_genes$entrez_id != ""]
+background_proteome <- data.frame(background_proteome)
+
+## PHOSPHO
+df <- as.data.frame(unique_to_phosphoproteins)
+df$gene <- df$unique_to_phosphoproteins
+entrez <- AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db,
+                                keys = df$gene,
+                                column = "ENTREZID",
+                                keytype = "SYMBOL")
+df <- df%>%
+    dplyr::mutate(entrez_id=entrez)
+
+# ORA
+ORA_only_phosphoprotein <- enrichGO(
+    df$entrez_id,
+    org.Hs.eg.db,
+    keyType = "ENTREZID",
+    ont = "ALL",
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    universe = background_proteome,
+    qvalueCutoff = 0.2,
+    minGSSize = 10,
+    maxGSSize = 500,
+    readable = FALSE,
+    pool = FALSE
+)
+ORA_only_phosphoprotein_filtered <- clusterProfiler::simplify(ORA_only_phosphoprotein, cutoff=0.7, by="p.adjust", select_fun=min)
+
+dotplot(ORA_only_phosphoprotein_filtered)
+
+dotplot_phospho <- ggplot(ORA_only_phosphoprotein_filtered, aes(x = GeneRatio, y = Description, size = Count, color = p.adjust)) +
+    geom_point() +
+    scale_color_gradient(low = "paleturquoise3", high = "mediumpurple3", name = "p.adjust") +
+    scale_size_continuous(name = "Count") +
+    theme_bw() +
+    theme(
+        legend.position = "top",
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 15),  #
+        axis.title.x = element_text(size = 6),  
+        axis.title.y = element_text(size = 0),  
+        axis.text.x = element_text(size = 6),  
+        axis.text.y = element_text(size = 6),  
+        legend.text = element_text(size = 6), 
+        legend.title = element_text(size = 6)  
+    ) +
+    labs(title = "ORA, Genes only identified in Phosphoproteome")
+dotplot_phospho
+
+
+```
+
+
+################# Differential expression analysis ###############################
+
+```{r LIMMA_Preparation}
+
+Clamp <- factor(Info$Condition, levels=c("Basal", "Insulin"))
+Group <- factor(Info$Group, levels=c("Lean","Obese","T2D"))
+Training <- factor(Info$Timepoint, levels=c("Pre", "Post"))
+Combined <- factor(Info$Combined, levels = c("LeanPreBasal", "LeanPreInsulin", "LeanPostBasal", "LeanPostInsulin", "ObesePreBasal", "ObesePreInsulin", "ObesePostBasal", "ObesePostInsulin", "T2DPreBasal", "T2DPreInsulin", "T2DPostBasal", "T2DPostInsulin"))
+
+```
+
+```{r Clamp_main_effect}
+
+design_clamp <- model.matrix(~Clamp * Group + Training)
+corfit_clamp <- duplicateCorrelation(phospho_dataset, design_clamp, block=Info$Participant)
+corfit_clamp$consensus
+# 0.01820698
+
+fit_clamp <- lmFit(phospho_dataset, design_clamp, block=Info$Participant, correlation=corfit_clamp$consensus)
+fit2_clamp <- eBayes(fit_clamp)
+
+# main effect insulin
+topTable_clamp <- topTable(fit2_clamp, coef = 2, number = Inf, sort.by = "logFC", adjust = "fdr") %>%
+    mutate(xiao = 10^-(sqrt(log10(1/(P.Value^logFC))^2))) %>%
+    arrange(desc(logFC))
+sig <- topTable_clamp[topTable_clamp$adj.P.Val < 0.05, ]
+significant_topTable_filtered <- na.omit(sig)
+cat("Number of rows with significant sites: ", nrow(significant_topTable_filtered), "\n")
+# 208
+topTable_clamp$Site <- rownames(topTable_clamp)
+
+upregulated_count <- sum(topTable_clamp$adj.P.Val < 0.05 & topTable_clamp$logFC > 0)
+downregulated_count <- sum(topTable_clamp$adj.P.Val < 0.05 & topTable_clamp$logFC < 0)
+cat("Number of significantly upregulated genes:", upregulated_count, "\n")
+# 134
+cat("Number of significantly downregulated genes:", downregulated_count, "\n")
+# 74
+
+
+############################# FIGURE S4E ################################
+# ORA clamp regulated phosphoproteins
+
+universe_genes <- unique(phosphoproteins)  
+universe_genes <- as.data.frame(universe_genes)
+
+entrez_universe <- AnnotationDbi::mapIds(
+  org.Hs.eg.db,
+  keys = universe_genes$universe_genes,
+  column = "ENTREZID",
+  keytype = "SYMBOL",
+  multiVals = "first"
+)
+
+universe_genes$entrez_id <- entrez_universe
+background_proteome <- universe_genes$entrez_id[!is.na(universe_genes$entrez_id) & universe_genes$entrez_id != ""]
+
+
+
+
+df <- as.data.frame(topTable_clamp[topTable_clamp$adj.P.Val < 0.05, ])
+# Extract protein names (before first "_") as gene symbols
+df$protein <- sub("_.*", "", df$Site)
+df <- df[!duplicated(df$protein), ]  # keep unique proteins
+
+df$gene <- df$protein
+entrez <- AnnotationDbi::mapIds(
+  org.Hs.eg.db,
+  keys = df$gene,
+  column = "ENTREZID",
+  keytype = "SYMBOL",
+  multiVals = "first"
+)
+
+df$entrez_id <- entrez
+df <- df[!is.na(df$entrez_id), ]
+
+# ORA
+ORA_clamp_phosphoprotein <- enrichGO(
+    df$entrez_id,
+    org.Hs.eg.db,
+    keyType = "ENTREZID",
+    ont = "ALL",
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    universe = background_proteome,
+    qvalueCutoff = 0.2,
+    minGSSize = 10,
+    maxGSSize = 500,
+    readable = FALSE,
+    pool = FALSE
+)
+ORA_clamp_phosphoprotein_filtered <- clusterProfiler::simplify(ORA_clamp_phosphoprotein, cutoff=0.7, by="p.adjust", select_fun=min)
+
+dotplot_phospho <- ggplot(ORA_clamp_phosphoprotein_filtered, aes(x = GeneRatio, y = Description, size = Count, color = p.adjust)) +
+    geom_point() +
+    scale_color_gradient(low = "paleturquoise3", high = "mediumpurple3", name = "p.adjust") +
+    scale_size_continuous(name = "Count") +
+    theme_bw() +
+    theme(
+        legend.position = "top",
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 15),  #
+        axis.title.x = element_text(size = 6),  
+        axis.title.y = element_text(size = 0),  
+        axis.text.x = element_text(size = 6),  
+        axis.text.y = element_text(size = 6),  
+        legend.text = element_text(size = 6), 
+        legend.title = element_text(size = 6)  
+    ) +
+    labs(title = "ORA, clamp")
+dotplot_phospho
+
+
+```
+
+
+```{r Training_main_effect}
+
+design_training <- model.matrix(~ Clamp * Group * Training)
+corfit_training <- duplicateCorrelation(phospho_dataset, design_training, block=Info$Participant)
+corfit_training$consensus
+# 0.02029757
+fit_training <- lmFit(phospho_dataset, design_training, block=Info$Participant, correlation=corfit_training$consensus)
+fit2_training <- eBayes(fit_training)
+
+# main effect training
+topTable_training <- topTable(fit2_training, coef = 5, number = Inf, sort.by = "logFC", adjust = "fdr") %>%
+    mutate(xiao = 10^-(sqrt(log10(1/(P.Value^logFC))^2))) %>%
+    arrange(desc(logFC))
+significant_adj <- topTable_training[topTable_training$adj.P.Val < 0.05, ]
+significant_topTable_filtered <- na.omit(significant_adj)
+cat("Number of rows with significant sites: ", nrow(significant_topTable_filtered), "\n")
+# 640
+topTable_training$Site <- rownames(topTable_training)
+
+upregulated <- sum(topTable_training$adj.P.Val < 0.05 & topTable_training$logFC > 0)
+downregulated <- sum(topTable_training$adj.P.Val < 0.05 & topTable_training$logFC < 0)
+cat("Number of significantly upregulated genes:", upregulated, "\n")
+# 296
+cat("Number of significantly downregulated genes:", downregulated, "\n")
+# 344
+
+
+```
+
+```{r Plots main_effect}
+
+############################### FIGURE 4F & FIGURE 4A #############################
+
+## volcano clamp main effect
+volcano <- function(.data) {
+    data_volcano <- .data %>%
+        dplyr::mutate(
+            significant = dplyr::case_when(
+                adj.P.Val < 0.05 & logFC > 0 ~ "significantly upregulated",
+                adj.P.Val < 0.05 & logFC < 0 ~ "significantly downregulated",
+                TRUE ~ "not significant"
+            )
+        )
+
+    p <- ggplot(data_volcano, aes(
+        x = logFC,
+        y = -log10(P.Value),
+        color = significant,
+        label = Site
+    )) +
+        geom_point(size = 0.4, alpha = 0.7) +
+        scale_color_manual(values = c(
+            "not significant" = "grey",
+            "significantly downregulated" = "dodgerblue4",
+            "significantly upregulated" = "firebrick4"
+        ), name = "Significantly different") +
+        theme_classic() +
+        theme(
+            text = element_text(size = 6, colour = "black"),
+            legend.position = "none"
+        )
+
+    labels_to_show <- c(
+        "AKT1S1_T246_M1",
+        "TBC1D4_S341_M1",
+        "AKT2_S474_M1",
+        "IRS1_S270_M1",
+        "SLC2A4_S10_M1",
+        "TBC1D4_S754_M1",
+        "RPS6KA3_S369_M2",
+        "TBC1D4_S754_M1",
+        "PLEC_S4396_M1",
+        "FLNC_S2236_M1"
+
+    )
+    p <- p + ggrepel::geom_text_repel(
+        data = dplyr::filter(data_volcano, Site %in% labels_to_show),
+        aes(
+            x = logFC,
+            y = -log10(P.Value),
+            label = Site,
+            color = significant
+        ),
+        size = 2,
+        min.segment.length = unit(0.1, "lines"),
+        segment.size = unit(0.1, "mm"),
+        force = 20,
+        max.overlaps = Inf
+    ) + scale_color_manual(values = c(
+        "not significant" = "grey",
+        "significantly downregulated" = "dodgerblue4",
+        "significantly upregulated" = "firebrick4"
+    ))
+
+    return(p)
+}
+
+v <- volcano(topTable_clamp) ## or use:    topTable_training   for FIGURE 4A
+v
+
+
+```
+
+
+
+```{r Specific contrasts}
+
+design_combined <- model.matrix(~ 0 + Combined)
+corfit__combined <- duplicateCorrelation(phospho_dataset, design_combined, block=Info$Participant)
+corfit__combined$consensus
+# 0.02029757
+fit_combined <- lmFit(phospho_dataset, design_combined, block=Info$Participant, correlation=corfit__combined$consensus)
+
+
+cm_all <- makeContrasts(
+    # GROUP DIFFERENCES    
+        # T2D vs Lean in Pre conditions (basal and insulin states)
+    T2D_Lean_prebasal = CombinedT2DPreBasal - CombinedLeanPreBasal,
+    T2D_Lean_preinsulin = CombinedT2DPreInsulin - CombinedLeanPreInsulin,
+        # T2D vs Lean in Post conditions (basal and insulin states)
+    T2D_Lean_postbasal = CombinedT2DPostBasal - CombinedLeanPostBasal,
+    T2D_Lean_postinsulin = CombinedT2DPostInsulin - CombinedLeanPostInsulin,
+        # T2D vs Obese in Pre conditions (basal and insulin states)
+    T2D_Obese_prebasal = CombinedT2DPreBasal - CombinedObesePreBasal,
+    T2D_Obese_preinsulin = CombinedT2DPreInsulin - CombinedObesePreInsulin,
+        # T2D vs Obese in Post conditions (basal and insulin states)
+    T2D_Obese_postbasal = CombinedT2DPostBasal - CombinedObesePostBasal,
+    T2D_Obese_postinsulin = CombinedT2DPostInsulin - CombinedObesePostInsulin,
+        # Obese vs Lean in Pre conditions (basal and insulin states)
+    Obese_Lean_prebasal = CombinedObesePreBasal - CombinedLeanPreBasal,
+    Obese_Lean_preinsulin = CombinedObesePreInsulin - CombinedLeanPreInsulin,
+        # Obese vs Lean in Post conditions (basal and insulin states)
+    Obese_Lean_postbasal = CombinedObesePostBasal - CombinedLeanPostBasal,
+    Obese_Lean_postinsulin = CombinedObesePostInsulin - CombinedLeanPostInsulin,
+    
+    # TRAINING EFFECTS
+        # Training effect within Lean group basal state
+    Lean_trainingBasal = CombinedLeanPostBasal - CombinedLeanPreBasal,
+        # Training effect within Lean group insulin state
+    Lean_trainingInsulin = CombinedLeanPostInsulin - CombinedLeanPreInsulin,
+        # Training effect within Obese group basal state
+    Obese_trainingBasal = CombinedObesePostBasal - CombinedObesePreBasal,
+        # Training effect within Obese group insulin state
+    Obese_trainingInsulin = CombinedObesePostInsulin - CombinedObesePreInsulin,
+        # Training effect within T2D group basal state
+    T2D_trainingBasal = CombinedT2DPostBasal - CombinedT2DPreBasal,
+        # Training effect within T2D group insulin state
+    T2D_trainingInsulin = CombinedT2DPostInsulin - CombinedT2DPreInsulin,
+    
+    # CLAMP EFFECTS
+        # Pre-training clamp effect within Lean group
+    Lean_clamp_pre = CombinedLeanPreInsulin - CombinedLeanPreBasal,
+        # Post-training clamp effect within Lean group
+    Lean_clamp_post = CombinedLeanPostInsulin - CombinedLeanPostBasal,
+        # Pre-training clamp effect within Obese group
+    Obese_clamp_pre = CombinedObesePreInsulin - CombinedObesePreBasal,
+        # Post-training clamp effect within Obese group
+    Obese_clamp_post = CombinedObesePostInsulin - CombinedObesePostBasal,
+        # Pre-training clamp effect within T2D group
+    T2D_clamp_pre = CombinedT2DPreInsulin - CombinedT2DPreBasal,
+        # Post-training clamp effect within T2D group
+    T2D_clamp_post = CombinedT2DPostInsulin - CombinedT2DPostBasal,
+    
+    levels = design_combined
+)
+
+fit2_combined <- eBayes(contrasts.fit(fit_combined, cm_all))
+
+
+# Define a function to extract the full table and count significant hits for a given comparison
+extract_and_store_full_table <- function(fit, comparison_name, p_value_threshold = 0.05) {
+    full_table <- limma::topTable(fit,
+                                  coef = comparison_name,
+                                  adjust = "BH",
+                                  number = Inf)
+    full_table$Site <- rownames(full_table)
+    significant_table <- full_table[full_table$adj.P.Val < p_value_threshold, ]
+    significant_table <- na.omit(significant_table)
+    cat("Comparison:", comparison_name, " - Number of significant hits:", nrow(significant_table), "\n")
+    assign(paste0(comparison_name), full_table, envir = .GlobalEnv)
+    return(nrow(significant_table))
+}
+
+comparisons <- c("T2D_Lean_prebasal", "T2D_Lean_preinsulin", 
+                 "T2D_Lean_postbasal", "T2D_Lean_postinsulin", 
+                 "T2D_Obese_prebasal", "T2D_Obese_preinsulin", 
+                 "T2D_Obese_postbasal", "T2D_Obese_postinsulin", 
+                 "Obese_Lean_prebasal", "Obese_Lean_preinsulin", 
+                 "Obese_Lean_postbasal", "Obese_Lean_postinsulin", 
+                 "Lean_trainingBasal", "Lean_trainingInsulin", 
+                 "Obese_trainingBasal", "Obese_trainingInsulin", 
+                 "T2D_trainingBasal", "T2D_trainingInsulin", 
+                 "Lean_clamp_pre", "Lean_clamp_post", 
+                 "Obese_clamp_pre", "Obese_clamp_post", 
+                 "T2D_clamp_pre", "T2D_clamp_post")
+
+for (comparison in comparisons) {
+    extract_and_store_full_table(fit2_combined, comparison)
+}
+
+
+
+
+# QC
+limma::plotMA(fit2_combined)
+for (comparison in comparisons) {
+  comparison_data <- get(comparison)
+  hist(comparison_data$P.Value, 
+       main = paste("Histogram of", comparison, "P.Value"),
+       xlab = "P-Value", 
+       col = "lightpink", 
+       border = "black")
+}
+
+
+
+```
+
+```{r Upset Plot specific contrasts TRAINING}
+
+
+####################### FIGURE S4D ##########################
+
+sig_sites_combined <- list(
+    Lean_basal = na.omit(Lean_trainingBasal$Site[Lean_trainingBasal$adj.P.Val < 0.05]),
+    Obese_basal = na.omit(Obese_trainingBasal$Site[Obese_trainingBasal$adj.P.Val < 0.05]),
+    T2D_basal = na.omit(T2D_trainingBasal$Site[T2D_trainingBasal$adj.P.Val < 0.05]),
+    Lean_insulin = na.omit(Lean_trainingInsulin$Site[Lean_trainingInsulin$adj.P.Val < 0.05]),
+    Obese_insulin = na.omit(Obese_trainingInsulin$Site[Obese_trainingInsulin$adj.P.Val < 0.05]),
+    T2D_insulin = na.omit(T2D_trainingInsulin$Site[T2D_trainingInsulin$adj.P.Val < 0.05])
+)
+
+unique_sites_combined <- unique(unlist(sig_sites_combined))
+
+binary_matrix_combined <- sapply(sig_sites_combined, function(sites) as.numeric(unique_sites_combined %in% sites))
+binary_df_combined <- as.data.frame(binary_matrix_combined, row.names = unique_sites_combined)
+
+upset_plot <- upset(
+  binary_df_combined,
+  sets = c( "T2D_insulin", "Obese_insulin","Lean_insulin", "T2D_basal", "Obese_basal","Lean_basal"),
+  nsets = 6,
+  nintersects = NA,
+  keep.order = TRUE
+)
+
+upset_plot
+
+
+
+```
+
+```{r plots specific contrasts CLAMP}
+
+############################## FIGURE 4H #############################
+
+## Clamp resposinve sites barplot
+
+
+comparisons <- c(
+    "Lean_clamp_pre", "Lean_clamp_post",
+    "Obese_clamp_pre", "Obese_clamp_post",
+    "T2D_clamp_pre", "T2D_clamp_post"
+)
+
+barplot_data <- data.frame(
+    Group_Timepoint = comparisons,
+    Upregulated = numeric(length(comparisons)),
+    Downregulated = numeric(length(comparisons))
+)
+
+
+for (i in seq_along(comparisons)) {
+    data <- get(comparisons[i])  
+    barplot_data$Upregulated[i] <- sum(data$adj.P.Val < 0.05 & data$logFC > 0, na.rm = TRUE)
+    barplot_data$Downregulated[i] <- -sum(data$adj.P.Val < 0.05 & data$logFC < 0, na.rm = TRUE)  
+}
+
+barplot_data_long <- barplot_data %>%
+    pivot_longer(cols = c(Upregulated, Downregulated), names_to = "Regulation", values_to = "Count")
+
+group_order <- comparisons
+
+sig <- ggplot(barplot_data_long, aes(x = factor(Group_Timepoint, levels = group_order), y = Count, fill = Regulation)) +
+    geom_bar(stat = "identity", position = "stack", width = 0.6) +
+    geom_text(aes(label = abs(Count), vjust = ifelse(Count > 0, -0.3, 1.3)), size = 3) +
+    labs(x = "Group and Time Point", y = "Count", fill = "Regulation") +
+    ggtitle("Counts of Significantly Upregulated and Downregulated Sites") +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    scale_fill_manual(values = c("Upregulated" = "firebrick4", "Downregulated" = "dodgerblue4"))
+print(sig)
+
+
+
+
+
+
+######################## FIGURE S4F ############################
+
+sig_sites <- list(
+    Lean_clamppre = na.omit(Lean_clamp_pre$Site[Lean_clamp_pre$adj.P.Val < 0.05]),
+    Obese_clamppre = na.omit(Obese_clamp_pre$Site[Obese_clamp_pre$adj.P.Val < 0.05]),
+    T2D_clamppre = na.omit(T2D_clamp_pre$Site[T2D_clamp_pre$adj.P.Val < 0.05]),
+    Lean_clamppost = na.omit(Lean_clamp_post$Site[Lean_clamp_post$adj.P.Val < 0.05]),
+    Obese_clamppost = na.omit(Obese_clamp_post$Site[Obese_clamp_post$adj.P.Val < 0.05]),
+    T2D_clamppost = na.omit(T2D_clamp_post$Site[T2D_clamp_post$adj.P.Val < 0.05])
+)
+
+unique_sites <- unique(unlist(sig_sites))
+
+binary_matrix <- sapply(sig_sites, function(sites) as.numeric(unique_sites %in% sites))
+binary_df <- as.data.frame(binary_matrix, row.names = unique_sites)
+
+clamp_upset <- upset(
+  binary_df,
+  sets = c( "T2D_clamppost" , "Obese_clamppost","Lean_clamppost","T2D_clamppre", "Obese_clamppre","Lean_clamppre" ),
+  nsets = 6,
+  nintersects = NA,
+  keep.order = TRUE
+)
+
+clamp_upset
+
+
+```
+
+
+
+```{r Boxplots}
+
+
+################################## FIGURE 4B & FIGURE 4I ###########################
+
+sites <- c( "")
+
+
+boxplots <- function(Sites, data, Info) {
+    plots_list <- list() 
+    
+    for (site_name in Sites) {
+
+        site_row <- data[site_name, , drop = FALSE]
+        site_row_t <- t(site_row)  
+        site_row_t <- as.data.frame(site_row_t)
+
+        site_row_t$Combined <- Info$Combined
+        site_row_t$Info <- factor(site_row_t$Combined, levels = c(
+            "LeanPreBasal", "LeanPreInsulin", "LeanPostBasal", "LeanPostInsulin",
+            "ObesePreBasal", "ObesePreInsulin", "ObesePostBasal", "ObesePostInsulin",
+            "T2DPreBasal", "T2DPreInsulin", "T2DPostBasal", "T2DPostInsulin"
+        ))
+        site_row_t$Group <- Info$Group
+        site_row_t$Timepoint <- Info$Timepoint
+        site_row_t$Participant <- Info$Participant
+        site_row_t$Condition <- Info$Condition
+
+
+        color_fill <- c("Pre" = "white", "Post" = "mistyrose1")
+        color_groups <- c("Lean" = "deepskyblue4", "Obese" = "purple4", "T2D" = "maroon3")
+
+        point_size <- 0.01
+        line_size <- 0.2
+        fatten_median <- 0.8
+
+        plot <- ggplot(site_row_t, aes(x = Info, y = !!sym(site_name), color = Group, fill = Timepoint)) +
+            geom_boxplot(outlier.size = point_size,outlier.alpha = 0.5, size = line_size, fatten = fatten_median) +
+            geom_point(size = point_size, alpha = 0.2, position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.5)) +
+            geom_line(aes(group = Participant, colour = Group), size = 0.1, alpha = 0.4) +
+            labs(title = paste("", site_name)) +
+            scale_fill_manual(values = color_fill) +
+            scale_color_manual(values = color_groups) +
+            theme_classic() +
+            theme(
+                legend.position = "none",
+                text = element_text(size = 6),
+                axis.title.x = element_blank(),
+                axis.text.x = element_blank(),
+                axis.title.y = element_blank(),
+                axis.text.y = element_text(size = 6),
+                plot.title = element_text(size = 6, face = "bold")
+            )
+        
+        plots_list[[site_name]] <- plot
+    }
+
+    combined_plots <- do.call(grid.arrange, c(plots_list, ncol = 1))
+
+    return(combined_plots)
+}
+
+plots <- boxplots(Sites = sites, data = phospho_dataset, Info = Info)
+
+```
+
+
+```{r Phosphoproteome and proteome regulation}
+
+## corelate logFC site and host protein
+
+# load proteome data, eg:
+# load(here::here("data/table_MainEffect_Training.rda"))
+#topTable_training_proteome <- table_MainEffect_Training
+
+# add phosphoprotein column in topTable
+topTable_training$Phosphoprotein <- substr(topTable_training$Site, 1, regexpr("_", topTable_training$Site) - 1)
+
+
+####################################### FIGURE S4A ###################################
+
+overlap <- topTable_training
+overlap$Phospho_regulation <- NA
+overlap$Phospho_regulation <- case_when(
+    overlap$adj.P.Val < 0.05 & overlap$logFC > 0 ~ "up",
+    TRUE ~ overlap$Phospho_regulation
+)
+overlap$Phospho_regulation <- case_when(
+    overlap$adj.P.Val < 0.05 & overlap$logFC < 0 ~ "down",
+    TRUE ~ overlap$Phospho_regulation
+)
+overlap$Phospho_regulation <- case_when(
+    overlap$adj.P.Val > 0.05 ~ "none",
+    TRUE ~ overlap$Phospho_regulation
+)
+
+overlap <- overlap %>%
+    left_join(
+        topTable_training_proteome %>%
+            dplyr::select(Protein, logFC, adj.P.Val) %>%
+            rename(proteome_logFC = logFC, proteome_adj.P.Val = adj.P.Val),
+        by = c("Phosphoprotein" = "Protein")
+    )
+
+overlap$Proteome_regulation <- NA
+overlap$Proteome_regulation <- case_when(
+    overlap$proteome_adj.P.Val < 0.05 & overlap$proteome_logFC > 0 ~ "up",
+    TRUE ~ overlap$Proteome_regulation
+)
+overlap$Proteome_regulation <- case_when(
+    overlap$proteome_adj.P.Val < 0.05 & overlap$proteome_logFC < 0 ~ "down",
+    TRUE ~ overlap$Proteome_regulation
+)
+overlap$Proteome_regulation <- case_when(
+    overlap$proteome_adj.P.Val > 0.05 ~ "none",
+    TRUE ~ overlap$Proteome_regulation
+)
+
+
+overlap$Phospho_Proteome_regulation <- paste(overlap$Phospho_regulation, overlap$Proteome_regulation, sep = "_")
+
+counts_overlap <- table(overlap$Phospho_Proteome_regulation)
+counts_overlap
+
+# Replace missing logFC_Proteome values with 1.5
+overlap$proteome_logFC[is.na(overlap$proteome_logFC)] <- 1.5
+overlap$Proteome_regulation[is.na(overlap$Proteome_regulation)] <- "NA"
+
+valid_levels <- unique(overlap$Phospho_Proteome_regulation)
+print(valid_levels)
+
+labels <- c("MTFR1L_S238_M1", "GPRC5C_T423_M1", "MYPN_S101_M1", "SEC16A_S1069_M1", "PTPN12_S449_M1", "MYH2_T1372_M1", "JSRP1_S186_M1", "FLNC_S2602_M1")
+
+overlap <- overlap %>%
+    mutate(label = ifelse(Site %in% labels, Site, NA))
+
+overlap <- overlap %>%
+    mutate(plot_order = ifelse(Phospho_Proteome_regulation %in% c('none_NA', 'none_none', 'none_up', 'none_down'), 1, 2)) %>%
+    arrange(plot_order)
+
+
+training_overlap <- ggplot(overlap, aes(x = proteome_logFC, y = logFC, color = Phospho_Proteome_regulation, shape = Phospho_Proteome_regulation)) +
+    geom_vline(xintercept = 0, linetype = "solid", color = "grey40") +
+    geom_hline(yintercept = 0, linetype = "solid", color = "grey40") +
+    labs(x = "logFC (Post - Pre) Proteome", y = "logFC (Post - Pre) Phosphosite") +
+    geom_point(aes(size = Phospho_Proteome_regulation, alpha = Phospho_Proteome_regulation), position = position_nudge(y = 0)) +
+    geom_text_repel(aes(label = label), size = 2, max.overlaps = Inf, min.segment.length = unit(0.1, "lines"),
+        segment.size = unit(0.2, "mm"),force = 30,) +
+    scale_size_manual(values = c(
+        'none_NA' = 0.2,
+        'none_none' = 0.2,
+        'up_NA' = 0.4,
+        'up_up' = 0.4,
+        'up_none' = 0.3,
+        'none_down' = 0.2,
+        'none_up' = 0.2,
+        'up_down' = 0.4,
+        'down_down' = 0.4,
+        'down_NA' = 0.4,
+        'down_none' = 0.3
+    )) +
+    scale_alpha_manual(values = c(
+        'none_NA' = 0.4,
+        'none_none' = 0.4,
+        'up_NA' = 0.5,
+        'up_up' = 0.6,
+        'up_none' = 0.5,
+        'none_down' = 0.4,
+        'none_up' = 0.4,
+        'up_down' = 0.6,
+        'down_down' = 0.6,
+        'down_NA' = 0.5,
+        'down_none' = 0.5
+    )) +
+    scale_color_manual(values = c(
+        'none_NA' = "grey80",
+        'none_none' = "grey80",
+        'up_NA' = "red",
+        'up_up' = "deeppink",
+        'up_none' = "firebrick4",
+        'none_down' = "grey80",
+        'none_up' = "grey80",
+        'up_down' = "black",
+        'down_down' = "deepskyblue",
+        'down_NA' = "blue",
+        'down_none' = "dodgerblue4"
+    ), name = "Phospho_Proteome_regulation") +
+       scale_shape_manual(values = c(
+        'none_NA' = 16,    
+        'none_none' = 16, 
+        'up_NA' = 15,      
+        'up_up' = 17,     
+        'up_none' = 3,   
+        'none_down' = 16, 
+        'none_up' = 16,   
+        'up_down' = 8,    
+        'down_down' = 17,  
+        'down_NA' = 15,     
+        'down_none' = 3    
+    )) +
+    theme_classic() +
+    theme(
+        text = element_text(size = 6, colour = "black"),
+        legend.position = "none"
+    )
+
+
+
+
+
+
+
+training_overlap <- ggplot(overlap, aes(x = proteome_logFC, y = logFC, color = Phospho_Proteome_regulation, shape = Phospho_Proteome_regulation)) +
+    geom_vline(xintercept = 0, linetype = "solid", color = "grey40") +
+    geom_hline(yintercept = 0, linetype = "solid", color = "grey40") +
+    labs(x = "logFC (Post - Pre) Proteome", y = "logFC (Post - Pre) Phosphosite") +
+    geom_point(aes(size = Phospho_Proteome_regulation, alpha = Phospho_Proteome_regulation), position = position_nudge(y = 0)) +
+    geom_text_repel(aes(label = label), size = 2, max.overlaps = Inf, min.segment.length = unit(0.1, "lines"),
+        segment.size = unit(0.2, "mm"),force = 30,) +
+    scale_size_manual(values = c(
+        'none_NA' = 0.2,
+        'none_none' = 0.2,
+        'up_NA' = 0.4,
+        'up_up' = 0.4,
+        'up_none' = 0.3,
+        'none_down' = 0.2,
+        'none_up' = 0.2,
+        'up_down' = 0.4,
+        'down_down' = 0.4,
+        'down_NA' = 0.4,
+        'down_none' = 0.3
+    )) +
+    scale_alpha_manual(values = c(
+        'none_NA' = 0.4,
+        'none_none' = 0.4,
+        'up_NA' = 0.5,
+        'up_up' = 0.6,
+        'up_none' = 0.5,
+        'none_down' = 0.4,
+        'none_up' = 0.4,
+        'up_down' = 0.6,
+        'down_down' = 0.6,
+        'down_NA' = 0.5,
+        'down_none' = 0.5
+    )) +
+    scale_color_manual(values = c(
+        'none_NA' = "grey80",
+        'none_none' = "grey80",
+        'up_NA' = "red",
+        'up_up' = "deeppink",
+        'up_none' = "firebrick4",
+        'none_down' = "grey80",
+        'none_up' = "grey80",
+        'up_down' = "black",
+        'down_down' = "deepskyblue",
+        'down_NA' = "blue",
+        'down_none' = "dodgerblue4"
+    ), name = "Phospho_Proteome_regulation") +
+       scale_shape_manual(values = c(
+        'none_NA' = 16,    
+        'none_none' = 16, 
+        'up_NA' = 3,      
+        'up_up' = 3,     
+        'up_none' = 3,   
+        'none_down' = 16, 
+        'none_up' = 16,   
+        'up_down' = 3,    
+        'down_down' = 3,  
+        'down_NA' = 3,     
+        'down_none' = 3    
+    )) +
+    theme_classic() +
+    theme(
+        text = element_text(size = 6, colour = "black"),
+        legend.position = "none"
+    )
+
+print(training_overlap)
+
+```
+
+
+```{r Group specific training effects, overlapped with proteome}
+
+## load proteome data (group specific training effect toptables), eg:
+#Obese_trainingBasal_proteome <- load(here::here("data/Obese_trainingBasal.rda"))
+#Lean_trainingBasal_proteome <- load(here::here("data/Lean_trainingBasal.rda"))
+#T2D_trainingBasal_proteome <- load(here::here("data/T2D_trainingBasal.rda"))
+#Obese_trainingInsulin_proteome <- load(here::here("data/Obese_trainingInsulin.rda"))
+#Lean_trainingInsulin_proteome <- load(here::here("data/Lean_trainingInsulin.rda"))
+#T2D_trainingInsulin_proteome <- load(here::here("data/T2D_trainingInsulin.rda"))
+
+# Function to process proteome and phospho data
+process_proteome_phospho_data <- function(proteome_file, phospho_file) {
+    # Load Proteome data dynamically
+    proteome_data_env <- new.env()
+    load(proteome_file, envir = proteome_data_env)
+    proteome_data <- proteome_data_env[[ls(proteome_data_env)[1]]]  # Extract loaded object dynamically
+
+    # Identify significantly up/down-regulated proteins
+    proteome_up <- proteome_data %>% filter(adj.P.Val < 0.05 & logFC > 0) %>% pull(Protein)
+    proteome_down <- proteome_data %>% filter(adj.P.Val < 0.05 & logFC < 0) %>% pull(Protein)
+
+    # Load Phosphoproteome data dynamically
+    phospho_data_env <- new.env()
+    load(phospho_file, envir = phospho_data_env)
+    phospho_data <- phospho_data_env[[ls(phospho_data_env)[1]]]  # Extract loaded object dynamically
+
+    # Ensure a "Protein" column exists by extracting from "Site"
+    if ("Site" %in% colnames(phospho_data)) {
+        phospho_data$Protein <- sub("_.*", "", phospho_data$Site)
+    } else {
+        stop("Column 'Site' not found in phospho data. Check dataset format.")
+    }
+
+    # Process Phospho data
+    phospho_data <- phospho_data %>%
+        mutate(
+            Phospho_regulation = case_when(
+                adj.P.Val < 0.05 & logFC > 0 ~ "up",
+                adj.P.Val < 0.05 & logFC < 0 ~ "down",
+                TRUE ~ "NA"
+            ),
+            Proteome_regulation = case_when(
+                Protein %in% proteome_up ~ "sig_up",
+                Protein %in% proteome_down ~ "sig_down",
+                TRUE ~ "NA"
+            ),
+            Phospho_Proteome_regulation = paste(Phospho_regulation, Proteome_regulation, sep = "_and_")
+        )
+
+    # Return processed data and table counts
+    return(list(data = phospho_data, counts = table(phospho_data$Phospho_Proteome_regulation)))
+}
+
+# Define file paths for Proteome and Phospho data
+#proteome_files <- list(
+  #  Obese_Basal = here("data/Obese_trainingBasal.rda"),
+ #   Lean_Basal = here("data/Lean_trainingBasal.rda"),
+ #   T2D_Basal = here("data/T2D_trainingBasal.rda"),
+ #   Obese_Insulin = here("data/Obese_trainingInsulin.rda"),
+ #   Lean_Insulin = here("data/Lean_trainingInsulin.rda"),
+ #   T2D_Insulin = here("data/T2D_trainingInsulin.rda")
+#)
+
+phospho_files <- list(
+    Obese_Basal = here("data/Obese_trainingBasal.rda"),
+    Lean_Basal = here("data/Lean_trainingBasal.rda"),
+    T2D_Basal = here("data/T2D_trainingBasal.rda"),
+    Obese_Insulin = here("data/Obese_trainingInsulin.rda"),
+    Lean_Insulin = here("data/Lean_trainingInsulin.rda"),
+    T2D_Insulin = here("data/T2D_trainingInsulin.rda")
+)
+
+# Process all conditions dynamically
+results_list <- list()
+for (condition in names(proteome_files)) {
+    results_list[[condition]] <- process_proteome_phospho_data(proteome_files[[condition]], phospho_files[[condition]])
+}
+
+# Generate results table dynamically
+categories <- unique(unlist(lapply(results_list, function(x) names(x$counts))))
+results_table <- data.frame(Category = categories)
+
+for (condition in names(results_list)) {
+    results_table[[condition]] <- results_list[[condition]]$counts[match(categories, names(results_list[[condition]]$counts))]
+}
+
+# Replace NA with 0 for missing categories
+results_table[is.na(results_table)] <- 0
+
+# Create the table and format it using kableExtra
+x <- results_table %>%
+    kbl(caption = "Proteome Phospho_Proteome Regulation Overlap", align = "c") %>%
+    kable_styling(full_width = TRUE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+    add_header_above(c(" " = 1, "Basal State" = 3, "Insulin State" = 3))
+
+
+# Extract the counts from results_list dynamically
+results_table <- data.frame(
+    Category = unique(unlist(lapply(results_list, function(x) names(x$counts)))),
+    stringsAsFactors = FALSE
+)
+
+# Fill in the actual counts from each condition
+for (condition in names(results_list)) {
+    results_table[[condition]] <- sapply(results_table$Category, function(cat) {
+        if (cat %in% names(results_list[[condition]]$counts)) {
+            results_list[[condition]]$counts[[cat]]
+        } else {
+            0  # If the category is missing, set count to 0
+        }
+    })
+}
+
+# Convert to long format for ggplot2
+results_long <- results_table %>%
+    pivot_longer(cols = -Category, names_to = "Condition", values_to = "Count")
+
+
+
+############################# FIGURE 4E ###############################
+
+# Create the ggplot2 table (heatmap-style)
+table_plot <- ggplot(results_long, aes(x = Condition, y = Category, fill = Count)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Count), color = "black", size = 3) +
+    scale_fill_gradient(low = "white", high = "blue") +  # Adjust colors as needed
+    theme_minimal() +
+    labs(title = "TRAINING EFFECT Phospho_Proteome regulation",
+         x = "Training effect", y = "Regulation [Site_Protein]") +
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.title = element_text(size = 12, face = "bold"),
+        plot.title = element_text(size = 14, face = "bold"),
+        legend.position = "none"
+    )
+
+```
+
+
+```{r sites normalized to proteins}
+
+### load Global_Proteome dataset
+
+#name phospho dataset columns same as proteome and Info$ID
+colnames(phospho_dataset) <- setNames(Info$ID, Info$label)[colnames(phospho_dataset)]
+
+# Find and remove  missing sample (excl in proteome) in phoshpo and info
+missing_sample <- setdiff(colnames(phospho_dataset), colnames(proteome_dataset))
+print(missing_sample)
+phospho_dataset <- phospho_dataset[, colnames(phospho_dataset) != missing_sample]
+Info <- Info[Info$ID != missing_sample, ]
+
+# reorder columns  to match Info$label order
+proteome_dataset <- proteome_dataset[, match(Info$ID, colnames(proteome_dataset))]
+phospho_dataset <- phospho_dataset[, match(Info$ID, colnames(phospho_dataset))]
+
+###
+
+
+phospho_dataset$site <- rownames(phospho_dataset)
+phospho_dataset$phosphoprotein <- substr(phospho_dataset$site, 1, regexpr("_", phospho_dataset$site) - 1)
+
+proteome_dataset$protein <- rownames(proteome_dataset)
+
+
+
+
+phospho_long <- phospho_dataset %>%
+  pivot_longer(cols = -c(site, phosphoprotein), names_to = "Sample", values_to = "PhosphoIntensity")
+
+proteome_long <- proteome_dataset %>%
+  pivot_longer(cols = -protein, names_to = "Sample", values_to = "ProteinIntensity")
+
+
+
+InputNorm_data <- phospho_long %>%
+  left_join(proteome_long, by = c("phosphoprotein" = "protein", "Sample"))
+
+
+InputNorm_data <- InputNorm_data %>%
+  mutate(input_normalized = PhosphoIntensity / ProteinIntensity)
+
+InputNorm_wide <- InputNorm_data %>%
+  dplyr::select(site, Sample, input_normalized) %>%
+  pivot_wider(names_from = Sample, values_from = input_normalized)
+
+InputNorm_wide <- InputNorm_wide %>%
+  column_to_rownames("site")
+
+
+## filter for valid values
+InputNorm_wide_filter <- InputNorm_wide[rowMeans(!is.na(InputNorm_wide)) >= 0.6, ]  # keep rows with >=60% data
+# 12147 sites
+#usethis::use_data(InputNorm_wide_filter, overwrite = TRUE)
+load(here::here("data/InputNorm_wide_filter.rda"))
+
+t <- InputNorm_wide_filter
+t$site <- rownames(t)
+
+
+
+################## LIMMA 
+
+Clamp <- factor(Info$Condition, levels=c("Basal", "Insulin"))
+Group <- factor(Info$Group, levels=c("Lean","Obese","T2D"))
+Training <- factor(Info$Timepoint, levels=c("Pre", "Post"))
+Combined <- factor(Info$Combined, levels = c("LeanPreBasal", "LeanPreInsulin", "LeanPostBasal", "LeanPostInsulin", "ObesePreBasal", "ObesePreInsulin", "ObesePostBasal", "ObesePostInsulin", "T2DPreBasal", "T2DPreInsulin", "T2DPostBasal", "T2DPostInsulin"))
+
+
+design_clamp <- model.matrix(~Clamp * Group + Training)
+corfit_clamp <- duplicateCorrelation(InputNorm_wide_filter, design_clamp, block=Info$Participant)
+corfit_clamp$consensus
+# 0.05929898
+
+fit_clamp <- lmFit(InputNorm_wide_filter, design_clamp, block=Info$Participant, correlation=corfit_clamp$consensus)
+fit2_clamp <- eBayes(fit_clamp)
+
+# main effect insulin
+topTable_clamp_inputNorm <- topTable(fit2_clamp, coef = 2, number = Inf, sort.by = "logFC", adjust = "fdr") %>%
+    mutate(xiao = 10^-(sqrt(log10(1/(P.Value^logFC))^2))) %>%
+    arrange(desc(logFC))
+# 
+topTable_clamp_inputNorm$site <- rownames(topTable_clamp_inputNorm)
+
+
+
+
+
+design_training <- model.matrix(~ Clamp * Group * Training)
+corfit_training <- duplicateCorrelation(InputNorm_wide_filter, design_training, block=Info$Participant)
+corfit_training$consensus
+# 0.06035163
+
+fit_training <- lmFit(InputNorm_wide_filter, design_training, block=Info$Participant, correlation=corfit_training$consensus)
+fit2_training <- eBayes(fit_training)
+
+# main effect training
+topTable_training_inputNorm <- topTable(fit2_training, coef = 5, number = Inf, sort.by = "logFC", adjust = "fdr") %>%
+    mutate(xiao = 10^-(sqrt(log10(1/(P.Value^logFC))^2))) %>%
+    arrange(desc(logFC))
+topTable_training_inputNorm$site <- rownames(topTable_training_inputNorm)
+
+
+
+
+
+
+################ specific contrasts
+
+design_combined <- model.matrix(~ 0 + Combined)
+corfit__combined <- duplicateCorrelation(InputNorm_wide_filter, design_combined, block=Info$Participant)
+corfit__combined$consensus
+# 0.06035163
+fit_combined <- lmFit(InputNorm_wide_filter, design_combined, block=Info$Participant, correlation=corfit__combined$consensus)
+
+
+cm_all <- makeContrasts(
+    # GROUP DIFFERENCES    
+        # T2D vs Lean in Pre conditions (basal and insulin states)
+    T2D_Lean_prebasal = CombinedT2DPreBasal - CombinedLeanPreBasal,
+    T2D_Lean_preinsulin = CombinedT2DPreInsulin - CombinedLeanPreInsulin,
+        # T2D vs Lean in Post conditions (basal and insulin states)
+    T2D_Lean_postbasal = CombinedT2DPostBasal - CombinedLeanPostBasal,
+    T2D_Lean_postinsulin = CombinedT2DPostInsulin - CombinedLeanPostInsulin,
+        # T2D vs Obese in Pre conditions (basal and insulin states)
+    T2D_Obese_prebasal = CombinedT2DPreBasal - CombinedObesePreBasal,
+    T2D_Obese_preinsulin = CombinedT2DPreInsulin - CombinedObesePreInsulin,
+        # T2D vs Obese in Post conditions (basal and insulin states)
+    T2D_Obese_postbasal = CombinedT2DPostBasal - CombinedObesePostBasal,
+    T2D_Obese_postinsulin = CombinedT2DPostInsulin - CombinedObesePostInsulin,
+        # Obese vs Lean in Pre conditions (basal and insulin states)
+    Obese_Lean_prebasal = CombinedObesePreBasal - CombinedLeanPreBasal,
+    Obese_Lean_preinsulin = CombinedObesePreInsulin - CombinedLeanPreInsulin,
+        # Obese vs Lean in Post conditions (basal and insulin states)
+    Obese_Lean_postbasal = CombinedObesePostBasal - CombinedLeanPostBasal,
+    Obese_Lean_postinsulin = CombinedObesePostInsulin - CombinedLeanPostInsulin,
+    
+    # TRAINING EFFECTS
+        # Training effect within Lean group basal state
+    Lean_trainingBasal = CombinedLeanPostBasal - CombinedLeanPreBasal,
+        # Training effect within Lean group insulin state
+    Lean_trainingInsulin = CombinedLeanPostInsulin - CombinedLeanPreInsulin,
+        # Training effect within Obese group basal state
+    Obese_trainingBasal = CombinedObesePostBasal - CombinedObesePreBasal,
+        # Training effect within Obese group insulin state
+    Obese_trainingInsulin = CombinedObesePostInsulin - CombinedObesePreInsulin,
+        # Training effect within T2D group basal state
+    T2D_trainingBasal = CombinedT2DPostBasal - CombinedT2DPreBasal,
+        # Training effect within T2D group insulin state
+    T2D_trainingInsulin = CombinedT2DPostInsulin - CombinedT2DPreInsulin,
+    
+    # CLAMP EFFECTS
+        # Pre-training clamp effect within Lean group
+    Lean_clamp_pre = CombinedLeanPreInsulin - CombinedLeanPreBasal,
+        # Post-training clamp effect within Lean group
+    Lean_clamp_post = CombinedLeanPostInsulin - CombinedLeanPostBasal,
+        # Pre-training clamp effect within Obese group
+    Obese_clamp_pre = CombinedObesePreInsulin - CombinedObesePreBasal,
+        # Post-training clamp effect within Obese group
+    Obese_clamp_post = CombinedObesePostInsulin - CombinedObesePostBasal,
+        # Pre-training clamp effect within T2D group
+    T2D_clamp_pre = CombinedT2DPreInsulin - CombinedT2DPreBasal,
+        # Post-training clamp effect within T2D group
+    T2D_clamp_post = CombinedT2DPostInsulin - CombinedT2DPostBasal,
+    
+    levels = design_combined
+)
+
+fit2_combined <- eBayes(contrasts.fit(fit_combined, cm_all))
+
+
+# Define a function to extract the full table and count significant hits for a given comparison
+extract_and_store_full_table <- function(fit, comparison_name, p_value_threshold = 0.05) {
+    full_table <- limma::topTable(fit,
+                                  coef = comparison_name,
+                                  adjust = "BH",
+                                  number = Inf)
+    full_table$Site <- rownames(full_table)
+    significant_table <- full_table[full_table$adj.P.Val < p_value_threshold, ]
+    significant_table <- na.omit(significant_table)
+    cat("Comparison:", comparison_name, " - Number of significant hits:", nrow(significant_table), "\n")
+    assign(paste0(comparison_name), full_table, envir = .GlobalEnv)
+    return(nrow(significant_table))
+}
+
+comparisons <- c("T2D_Lean_prebasal", "T2D_Lean_preinsulin", 
+                 "T2D_Lean_postbasal", "T2D_Lean_postinsulin", 
+                 "T2D_Obese_prebasal", "T2D_Obese_preinsulin", 
+                 "T2D_Obese_postbasal", "T2D_Obese_postinsulin", 
+                 "Obese_Lean_prebasal", "Obese_Lean_preinsulin", 
+                 "Obese_Lean_postbasal", "Obese_Lean_postinsulin", 
+                 "Lean_trainingBasal", "Lean_trainingInsulin", 
+                 "Obese_trainingBasal", "Obese_trainingInsulin", 
+                 "T2D_trainingBasal", "T2D_trainingInsulin", 
+                 "Lean_clamp_pre", "Lean_clamp_post", 
+                 "Obese_clamp_pre", "Obese_clamp_post", 
+                 "T2D_clamp_pre", "T2D_clamp_post")
+
+for (comparison in comparisons) {
+    extract_and_store_full_table(fit2_combined, comparison)
+}
+
+
+################################# FIGURE S4C #################################
+
+################### boxplots
+
+sites <- c("MYPN_S101_M1", 
+           "FLNC_S2602_M1",
+           "PRKAG2_S196_M1")
+
+boxplots <- function(Sites, data, Info) {
+    plots_list <- list() 
+    
+    for (site_name in Sites) {
+
+        site_row <- data[site_name, , drop = FALSE]
+        site_row_t <- t(site_row)  
+        site_row_t <- as.data.frame(site_row_t)
+
+        site_row_t$Combined <- Info$Combined
+        site_row_t$Info <- factor(site_row_t$Combined, levels = c(
+            "LeanPreBasal", "LeanPreInsulin", "LeanPostBasal", "LeanPostInsulin",
+            "ObesePreBasal", "ObesePreInsulin", "ObesePostBasal", "ObesePostInsulin",
+            "T2DPreBasal", "T2DPreInsulin", "T2DPostBasal", "T2DPostInsulin"
+        ))
+        site_row_t$Group <- Info$Group
+        site_row_t$Timepoint <- Info$Timepoint
+        site_row_t$Participant <- Info$Participant
+        site_row_t$Condition <- Info$Condition
+
+
+        color_fill <- c("Pre" = "white", "Post" = "mistyrose1")
+        color_groups <- c("Lean" = "deepskyblue4", "Obese" = "purple4", "T2D" = "maroon3")
+
+        point_size <- 0.05
+        line_size <- 0.2
+        fatten_median <- 0.8
+
+        plot <- ggplot(site_row_t, aes(x = Info, y = !!sym(site_name), color = Group, fill = Timepoint)) +
+            geom_boxplot(outlier.size = point_size, size = line_size, fatten = fatten_median) +
+            geom_point(size = point_size, alpha = 0.6, position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.8)) +
+            geom_line(aes(group = Participant, colour = Group), size = 0.1, alpha = 0.5) +
+            labs(title = paste("", site_name)) +
+            scale_fill_manual(values = color_fill) +
+            scale_color_manual(values = color_groups) +
+            theme_classic() +
+            theme(
+                legend.position = "none",
+                text = element_text(size = 6),
+                axis.title.x = element_blank(),
+                axis.text.x = element_blank(),
+                axis.title.y = element_blank(),
+                axis.text.y = element_text(size = 6),
+                plot.title = element_text(size = 6, face = "bold")
+            )
+        
+        plots_list[[site_name]] <- plot
+    }
+
+    combined_plots <- do.call(grid.arrange, c(plots_list, ncol = 1))
+
+    return(combined_plots)
+}
+
+plots <- boxplots(Sites = sites, data = InputNorm_wide_filter, Info = Info)
+
+```
+
+
+############################# KINASE ENRICHMENT ANALYSIS = KEA #########################
+
+
+```{r}
+
+### load in the UniProt data
+
+
+########### Kinase enrichment analysis, 
+
+## load the toptables from the training and clamp main effects
+
+# order the rows in topTables in the same order as phospho_dataset
+matching_indices <- match(phospho_dataset$PTM_collapse_key, topTable$ID)
+topTable_reordered <- topTable[matching_indices, ]
+
+# add position of site
+topTable_reordered$position <- phospho_dataset[which(phospho_dataset$PTM_collapse_key %in% topTable$ID),]$PTM_collapse_key
+topTable_reordered$position <- word(topTable_reordered$position,2,sep="_")
+topTable_reordered$position <- as.numeric(gsub("[STY]", "", topTable_reordered$position))
+
+# add sequence window
+topTable_reordered$new_uniprotID <- gsub("_.*", "", Uniprot_data_saved)
+topTable_reordered$down_site <- topTable_reordered$position - 9
+topTable_reordered$up_site <- topTable_reordered$position + 9
+topTable_reordered$dupl_down_site <- topTable_reordered$position - 9
+topTable_reordered$dupl_down_site[topTable_reordered$dupl_down_site < 0] <- 0
+topTable_reordered$window <- str_sub(Uniprot_data_saved, topTable_reordered$dupl_down_site, topTable_reordered$up_site)
+topTable_reordered$window[topTable_reordered$down_site == -7] <- paste0("________", topTable_reordered$window[topTable_reordered$down_site == -7])
+topTable_reordered$window[topTable_reordered$down_site == -6] <- paste0("_______", topTable_reordered$window[topTable_reordered$down_site == -6])
+topTable_reordered$window[topTable_reordered$down_site == -5] <- paste0("______", topTable_reordered$window[topTable_reordered$down_site == -5])
+topTable_reordered$window[topTable_reordered$down_site == -4] <- paste0("_____", topTable_reordered$window[topTable_reordered$down_site == -4])
+topTable_reordered$window[topTable_reordered$down_site == -3] <- paste0("____", topTable_reordered$window[topTable_reordered$down_site == -3])
+topTable_reordered$window[topTable_reordered$down_site == -2] <- paste0("___", topTable_reordered$window[topTable_reordered$down_site == -2])
+topTable_reordered$window[topTable_reordered$down_site == -1] <- paste0("__", topTable_reordered$window[topTable_reordered$down_site == -1])
+topTable_reordered$window[topTable_reordered$down_site == 0] <- paste0("_", topTable_reordered$window[topTable_reordered$down_site == 0])
+topTable_reordered$window[which(str_length(topTable_reordered$window) == 10)] <- paste0(topTable_reordered$window[which(str_length(topTable_reordered$window) == 10)], "_________")
+topTable_reordered$window[which(str_length(topTable_reordered$window) == 11)] <- paste0(topTable_reordered$window[which(str_length(topTable_reordered$window) == 11)], "________")
+topTable_reordered$window[which(str_length(topTable_reordered$window) == 12)] <- paste0(topTable_reordered$window[which(str_length(topTable_reordered$window) == 12)], "_______")
+topTable_reordered$window[which(str_length(topTable_reordered$window) == 13)] <- paste0(topTable_reordered$window[which(str_length(topTable_reordered$window) == 13)], "______")
+topTable_reordered$window[which(str_length(topTable_reordered$window) == 14)] <- paste0(topTable_reordered$window[which(str_length(topTable_reordered$window) == 14)], "_____")
+topTable_reordered$window[which(str_length(topTable_reordered$window) == 15)] <- paste0(topTable_reordered$window[which(str_length(topTable_reordered$window) == 15)], "____")
+topTable_reordered$window[which(str_length(topTable_reordered$window) == 16)] <- paste0(topTable_reordered$window[which(str_length(topTable_reordered$window) == 16)], "___")
+topTable_reordered$window[which(str_length(topTable_reordered$window) == 17)] <- paste0(topTable_reordered$window[which(str_length(topTable_reordered$window) == 17)], "__")
+topTable_reordered$window[which(str_length(topTable_reordered$window) == 18)] <- paste0(topTable_reordered$window[which(str_length(topTable_reordered$window) == 18)], "_")
+
+
+### make foreground datasets
+
+# Training (control for proteome changes by only using sites on proteins not changed with training)
+foreground_training_proteomeNONE <- topTable_reordered %>%
+    filter(Proteome_regulation == "none" & Phospho_regulation != "none") %>%
+    dplyr::select(window)
+# 234
+
+# Clamp
+foreground_clamp <- topTable_reordered %>%
+    filter(adj.P.Val < 0.05) %>%
+    dplyr::select(window)
+# 208 
+
+### background data (all windows) 
+background_data <- as.data.frame(topTable_reordered$window)
+# 27216
+
+
+
+
+
+
+
+### load this into predetermined foreground and background sets on https://kinase-library.phosphosite.org/ea?a=ps
+### settings used: 
+#Run enrichment analysis on: Serine/thronine and tyrosine kinases
+# p-value adjustment method: Benjamini-Hochberg procedure (FDR)
+# include Ser vs Thr favoribility for the central phospho-acceptor
+
+## Download table as tab-seperated file # save in data-raw
+# load results back into R and continue:
+
+
+
+### load skeletal muscle tissue expressed kinases from Human Protein Atlas
+#muscle_kinases <- read.delim(xx)
+# 247
+
+
+# filter KEA results for kinases in muscle_kinases: 381 to 247 kinases
+KEA_training_filtered <- KEA_training %>%
+    filter(kinase %in% muscle_kinases$kinase)
+
+KEA_clamp_filtered <- KEA_clamp %>%
+    filter(kinase %in% muscle_kinases$kinase)
+
+
+
+
+
+KEA_training_filtered_sig <- KEA_training_filtered %>%
+    filter(adjusted_p_value < 0.05)
+# 17
+
+KEA_clamp_filtered_sig <- KEA_clamp_filtered %>%
+    filter(adjusted_p_value < 0.05)
+# 39
+
+
+
+################################ FIGURE 4C & FIGURE 4G ######################################
+
+volcano_kinase <- function(.data) {
+    data_volcano <- .data %>%
+        dplyr::filter(enrichment_value_log2 >= 0) %>%  # Filter for x >= 0
+        dplyr::mutate(
+            significant = dplyr::case_when(
+                adjusted_p_value < 0.05 & enrichment_value > 0 ~ "significantly enriched",
+                TRUE ~ "not significant"
+            ),
+            label = dplyr::case_when(
+                adjusted_p_value < 0.05 ~ as.character(kinase),
+                TRUE ~ ""
+            )
+        )
+
+    plot <- ggplot(data_volcano, aes(
+        x = enrichment_value_log2,
+        y = adjusted_p_value_log10_abs,
+        color = significant
+    )) +
+        geom_point(size = 0.5, alpha = 0.7) +
+        ggrepel::geom_text_repel(
+            aes(label = label),
+            color = "seagreen",
+            size = 2,
+            min.segment.length = 0.01,
+            segment.size = 0.1,
+            force = 20,
+            max.overlaps = Inf
+        ) +
+        scale_color_manual(values = c('grey', 'seagreen'), name = "Kinase Enrichment") +
+        theme_classic() +
+        theme(
+            text = element_text(size = 6, colour = "black"),
+            legend.position = "none"
+        ) +
+        labs(
+            x = "log2 (Enrichment value)",
+            y = "-log10 (Adjusted p-value)"
+        )
+
+    return(plot)
+}
+volcano_training <- volcano_kinase(KEA_training_filtered) ### or run on KEA_clamp_filtered_sig
+volcano_training
+
+
+```
+
+
+
+
+
+
+

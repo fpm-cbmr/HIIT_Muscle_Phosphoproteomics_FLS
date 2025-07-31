@@ -1,0 +1,3226 @@
+---
+title: "Global_Proteome"
+author: "FLS"
+format: html
+execute:
+  echo: true
+  warning: false 
+  message: false
+---
+
+```{r setup}
+
+source(here::here("libraries.R"))
+
+```
+
+```{r load raw data}
+
+raw <- read.delim(here::here("data-raw/directDIA_Proteome_Report_Protein.tsv"), header = TRUE, na.strings = c("NaN"))
+
+nrow(raw)
+# 5558
+ncol(raw)
+# 169
+
+# meta data
+Rename <- read_excel(here::here("data-raw/Rename.xlsx"))
+
+```
+
+```{r prepare raw data}
+
+# name rows by unique gene name
+raw$PG.Genes %>% duplicated() %>% any()
+# TRUE
+raw %>% group_by(PG.Genes) %>% summarize(frequency = n()) %>%
+    arrange(desc(frequency)) %>% filter(frequency > 1)
+# Make unique names using the annotation in the "Gene.names" column as primary names and the annotation in "Protein.IDs" as name for those that do not have an gene name.
+raw_unique <- make_unique(raw, "PG.Genes", "PG.UniProtIds", delim = ";")
+raw_unique$name %>% duplicated() %>% any()
+# FALSE
+rownames(raw_unique) <- raw_unique$name
+
+
+```
+
+```{r QC raw data}
+
+# detected proteins per sample
+mat_raw <- as.matrix(raw_unique[, 6:169])
+quanted_raw <- colSums(!is.na(mat_raw))
+quanted_raw <- as.data.frame(quanted_raw)
+average_proteins_per_sample <- quanted_raw %>%
+    summarise(avg_sites = mean(quanted_raw, na.rm = TRUE),
+              std_dev = sd(quanted_raw, na.rm = TRUE))
+print(average_proteins_per_sample)
+# avg_sites  std_dev
+#  5283.232  +- 180.1825
+ggplot(data = quanted_raw, aes(x = 1:164, y = quanted_raw)) +
+    geom_bar(stat = "identity", fill = "lightblue3") +
+    labs(title = "Proteins per Sample", x = "Sample", y = "Proteins identified") +
+    theme(axis.text.x = element_text(size = 8, angle = 40, hjust = 1)) +  # Adjust x axis text
+    geom_hline(yintercept = average_proteins_per_sample$avg_sites,
+               linetype = "dashed", color = "maroon3") +  # Add a dashed line for average
+    geom_text(aes(x = 1, y = average_proteins_per_sample$avg_sites + 5),
+              label = paste("Avg:", round(average_proteins_per_sample$avg_sites, 2)),
+              color = "maroon4", vjust = 1.5, hjust = 0, size = 5) +
+    geom_text(aes(x = 1, y = average_proteins_per_sample$avg_sites - average_proteins_per_sample$std_dev - 10),
+              label = paste("SD:", round(average_proteins_per_sample$std_dev, 2)),
+              color = "blue", vjust = 1, hjust = 0, size = 5)
+
+#"X.38..20231115_PRI_TIMS5_NEO4_X1285_P276_R1051_101min_DIA_S38_B.D2_1_8479.d.PG.Quantity" has a lot of missing values - remove this sample
+
+column_to_remove <- c("X.38..20231115_PRI_TIMS5_NEO4_X1285_P276_R1051_101min_DIA_S38_B.D2_1_8479.d.PG.Quantity")
+raw_unique_removedoutlier <- raw_unique[, !names(raw_unique) %in% column_to_remove, drop = FALSE]
+
+
+
+################## FIGURE 1D ###########################
+
+# compare proteins detected to previously published datasets
+Hostrup2022 <- read_excel(here::here("data-raw/DetectedProteins_Hostrup2022.xlsx"))
+Hingst2018 <- read_excel(here::here("data-raw/DetectedProteins_Hingst2018.xlsx"))
+
+clean_genes <- function(genes) {
+    gene_list <- unlist(strsplit(genes, ";"))
+    clean_gene_list <- unique(gene_list[gene_list != ""])
+        cleaned_genes <- paste(clean_gene_list, collapse = ";")
+    return(cleaned_genes)
+}
+
+Hostrupcleaned <- Hostrup2022
+Hostrupcleaned$Cleaned_Genes <- sapply(Hostrupcleaned$Genes, clean_genes)
+
+Hingstcleaned <- Hingst2018
+Hingstcleaned$Cleaned_Genes <- sapply(Hingstcleaned$PG.Genes, clean_genes)
+
+genes_HIIT <- raw_unique_removedoutlier$PG.Genes
+genes_Hostrup <- Hostrupcleaned$Cleaned_Genes
+genes_Hingst <- Hingstcleaned$Cleaned_Genes
+
+genes_HIIT_unique <- unique(genes_HIIT)
+# 5551
+genes_Hostrup_unique <- unique(genes_Hostrup)
+# 3256
+genes_Hingst_unique <- unique(genes_Hingst)
+# 3269
+
+Overlap_hostrup_hingst <- list(ThisStudy = genes_HIIT_unique,
+                    Hostrup2022 = genes_Hostrup_unique,
+                    Hingst2018 = genes_Hingst_unique)
+
+venn_counts <- euler(Overlap_hostrup_hingst)
+venn.plot <- plot(venn_counts, counts = TRUE, quantities = TRUE, main = "Overlap unique gene names", fills = c("purple", "grey", "white"))
+print(venn.plot)
+
+# Extract genes only in genes_HIIT_unique
+genes_only_in_HIIT <- setdiff(genes_HIIT_unique, union(genes_Hostrup_unique, genes_Hingst_unique))
+# 2078
+
+
+
+####################### FIGURE 1E ##################################
+
+# dynamic range plot highlighting genes only identified in this study
+median_intensities <- apply(raw_unique_removedoutlier[, 6:168], 1, median, na.rm = TRUE)
+rank_abundance <- rank(-median_intensities)
+median_intensities_log10 <- log10(median_intensities)
+dynamic_range <- data.frame(genes = rownames(raw_unique_removedoutlier), RankAbundance = rank_abundance, Log10MedianIntensity = median_intensities_log10)
+
+dynamic_range <- dynamic_range %>%
+    mutate(PointColor = ifelse(genes %in% genes_only_in_HIIT, "mediumpurple", "grey"))
+
+label_high <- c("TTN", "MYH4",  "ACTB", "MYO1H", "CKM")
+label_high_data <- list()
+for (gene in label_high) {
+    gene_subset <- dynamic_range[dynamic_range$genes == gene, ]
+    label_high_data[[gene]] <- gene_subset
+}
+labels_high <- do.call(rbind, label_high_data)
+
+label_low <- c("FOXO1", "SLU7", "POLR2C", "RNMT", "RBFOX2", "RBM38")
+
+label_low_data <- list()
+for (gene in label_low) {
+    gene_subset <- dynamic_range[dynamic_range$genes == gene, ]
+    label_low_data[[gene]] <- gene_subset
+}
+labels_low <- do.call(rbind, label_low_data)
+
+dyn <- ggplot(dynamic_range, aes(x = RankAbundance, y = Log10MedianIntensity)) +
+    geom_point(aes(color = PointColor), alpha = 0.3, shape = 21) +
+    labs(x = "Protein Rank Abundance", y = "Log10 Median Intensity") +
+    theme_classic() +
+    guides(color = guide_legend(na.rm = TRUE)) +
+    geom_text_repel(
+        data = labels_high,
+        aes(label = genes, color = PointColor),  
+        size = 1.5,
+        nudge_y = 0.5, 
+        nudge_x = 1200,
+        force = 50, 
+        box.padding = 0.1, 
+        point.padding = 0,
+        max.overlaps = Inf,
+        segment.size = 0.3,
+        segment.alpha = 0.7,
+        min.segment.length = unit(0, "lines")
+    ) +
+    geom_text_repel(
+        data = labels_low,
+        aes(label = genes, color = PointColor),  
+        size= 1.5,
+        nudge_y = -0.5,  
+        nudge_x = -1300,
+        force = 30,  
+        box.padding = 0.1, 
+        point.padding = 0,  
+        max.overlaps = Inf,
+        segment.size = 0.3,
+        segment.alpha = 0.7,
+        min.segment.length = unit(0, "lines")
+    ) +
+    scale_color_identity() + 
+    theme(
+        text = element_text(face = "bold", colour = "black", size = 6),
+        legend.position = "none"
+    )
+
+dyn
+
+
+
+
+
+
+######################## FIGURE S5J ###########################
+
+label_high <- c("PRKAA1", "PRKAA2",  "PRKAB1")
+label_high_data <- list()
+for (gene in label_high) {
+    gene_subset <- dynamic_range[dynamic_range$genes == gene, ]
+    label_high_data[[gene]] <- gene_subset
+}
+labels_high <- do.call(rbind, label_high_data)
+
+label_low <- c("PRKAB2", "PRKAG1", "PRKAG2", "PRKAG3")
+
+label_low_data <- list()
+for (gene in label_low) {
+    gene_subset <- dynamic_range[dynamic_range$genes == gene, ]
+    label_low_data[[gene]] <- gene_subset
+}
+labels_low <- do.call(rbind, label_low_data)
+
+dyn <- ggplot(dynamic_range, aes(x = RankAbundance, y = Log10MedianIntensity)) +
+    geom_point(aes(color = "blue"), alpha = 0.3, shape = 21) +
+    labs(x = "Protein Rank Abundance", y = "Log10 Median Intensity") +
+    theme_classic() +
+    guides(color = guide_legend(na.rm = TRUE)) +
+    geom_text_repel(
+        data = labels_high,
+        aes(label = genes),  
+        size = 1.5,
+        nudge_y = 0.5, 
+        nudge_x = 1200,
+        force = 50, 
+        box.padding = 0.1, 
+        point.padding = 0,
+        max.overlaps = Inf,
+        segment.size = 0.3,
+        segment.alpha = 0.7,
+        min.segment.length = unit(0, "lines")
+    ) +
+    geom_text_repel(
+        data = labels_low,
+        aes(label = genes),  
+        size= 1.5,
+        nudge_y = -0.5,  
+        nudge_x = -1300,
+        force = 30,  
+        box.padding = 0.1, 
+        point.padding = 0,  
+        max.overlaps = Inf,
+        segment.size = 0.3,
+        segment.alpha = 0.7,
+        min.segment.length = unit(0, "lines")
+    ) +
+    scale_color_identity() + 
+    theme(
+        text = element_text(face = "bold", colour = "black", size = 6),
+        legend.position = "none"
+    )
+
+dyn
+
+
+
+
+
+
+####################### FIGURE 1F ###############################
+
+# ORA of genes uniquely identified in this study
+# universe genes:  all genes identified in all 3 studies
+universe_genes <- union(union(genes_HIIT_unique, genes_Hostrup_unique), genes_Hingst_unique)
+# 6006
+universe_genes <- as.data.frame(universe_genes)
+universe_genes$First_Value <- sapply(universe_genes$universe_genes, function(x) {
+    first_value <- unlist(strsplit(as.character(x), ";"))[1]
+    return(first_value)
+})
+universe_genes <- universe_genes[complete.cases(universe_genes$First_Value), ]
+
+entrez <- AnnotationDbi::mapIds(org.Hs.eg.db,
+                                keys = universe_genes$First_Value,
+                                column = "ENTREZID",
+                                keytype = "SYMBOL")
+
+
+# Add entrez IDs to the gene list
+universe_genes <- universe_genes %>%
+    mutate(entrez_id = entrez)
+background_proteome <- universe_genes$entrez_id[!is.na(universe_genes$entrez_id) & universe_genes$entrez_id != ""]
+background_proteome <- data.frame(background_proteome)
+
+## genes only identified in HIIT study
+df <- as.data.frame(genes_only_in_HIIT)
+df$gene <- df$df
+entrez <- AnnotationDbi::mapIds(org.Hs.eg.db::org.Hs.eg.db,
+                                keys = df$gene,
+                                column = "ENTREZID",
+                                keytype = "SYMBOL")
+df <- df%>%
+    dplyr::mutate(entrez_id=entrez)
+
+# ORA
+genes_only_in_HIIT_ORA_CC <- enrichGO(
+    df$entrez_id,
+    org.Hs.eg.db,
+    keyType = "ENTREZID",
+    ont = "CC",
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    universe = background_proteome,
+    qvalueCutoff = 0.2,
+    minGSSize = 10,
+    maxGSSize = 500,
+    readable = FALSE,
+    pool = FALSE
+)
+genes_only_in_HIIT_ORA_CC_filtered <- clusterProfiler::simplify(genes_only_in_HIIT_ORA_CC, cutoff=0.7, by="p.adjust", select_fun=min)
+
+genes_only_in_HIIT_ORA_BP <- enrichGO(
+    df$entrez_id,
+    org.Hs.eg.db,
+    keyType = "ENTREZID",
+    ont = "BP",
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    universe = background_proteome,
+    qvalueCutoff = 0.2,
+    minGSSize = 10,
+    maxGSSize = 500,
+    readable = FALSE,
+    pool = FALSE
+)
+genes_only_in_HIIT_ORA_BP_filtered <- clusterProfiler::simplify(genes_only_in_HIIT_ORA_BP, cutoff=0.7, by="p.adjust", select_fun=min)
+
+genes_only_in_HIIT_ORA_MF <- enrichGO(
+    df$entrez_id,
+    org.Hs.eg.db,
+    keyType = "ENTREZID",
+    ont = "MF",
+    pvalueCutoff = 0.05,
+    pAdjustMethod = "BH",
+    universe = background_proteome,
+    qvalueCutoff = 0.2,
+    minGSSize = 10,
+    maxGSSize = 500,
+    readable = FALSE,
+    pool = FALSE
+)
+genes_only_in_HIIT_ORA_MF_filtered <- clusterProfiler::simplify(genes_only_in_HIIT_ORA_MF, cutoff=0.7, by="p.adjust", select_fun=min)
+
+# Combine results into a single dataframe
+cc_df <- as.data.frame(genes_only_in_HIIT_ORA_CC_filtered@result)
+cc_df$Ontology <- "CC"
+bp_df <- as.data.frame(genes_only_in_HIIT_ORA_BP_filtered@result)
+bp_df$Ontology <- "BP"
+mf_df <- as.data.frame(genes_only_in_HIIT_ORA_MF_filtered@result)
+mf_df$Ontology <- "MF"
+combined_df <- bind_rows(cc_df, bp_df, mf_df)
+
+# Convert GeneRatio from fraction to numeric
+combined_df$GeneRatio <- sapply(combined_df$GeneRatio, function(x) {
+    eval(parse(text = x))
+})
+
+# Filter to retain only the top 10 categories for each ontology
+top_n_per_ontology <- combined_df %>%
+    group_by(Ontology) %>%
+    top_n(n = 3, wt = Count) %>%
+    ungroup()
+
+## based on lowest p-value
+top_n_per_ontology <- combined_df %>%
+    group_by(Ontology) %>%
+    top_n(n = 3, wt = -p.adjust) %>%
+    ungroup()
+gene_ratio_breaks <- pretty(top_n_per_ontology$GeneRatio, n = 5)
+dotplot_combined <- ggplot(top_n_per_ontology, aes(x = GeneRatio, y = Description, size = Count, color = p.adjust)) +
+    geom_point() +
+    facet_grid(Ontology ~ ., scales = "free_y", space = "free_y") +
+    scale_color_gradient(low = "paleturquoise3", high = "mediumpurple3", name = "p.adjust") +
+    scale_size_continuous(name = "Count") +
+    scale_x_continuous(breaks = gene_ratio_breaks, labels = scales::comma_format()) +
+    theme_bw() +
+    theme(
+        legend.position = "top",
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 10),  # Font size for facet labels
+        axis.title.x = element_text(size = 6),  # Font size for x-axis title
+        axis.title.y = element_text(size = 0),  # Font size for y-axis title
+        axis.text.x = element_text(size = 6),  # Font size for x-axis text
+        axis.text.y = element_text(size = 6),  # Font size for y-axis text
+        legend.text = element_text(size = 6),  # Font size for legend text
+        legend.title = element_text(size = 6)  # Font size for legend title
+    )
+
+
+
+
+
+```
+
+
+```{r raw data - rename columns}
+
+# rename columns
+print(colnames(raw_unique_removedoutlier))
+raw_unique_removedoutlier_renamed <- raw_unique_removedoutlier
+print(colnames(raw_unique_removedoutlier_renamed))
+names(raw_unique_removedoutlier_renamed)[6:168] <- substr(names(raw_unique_removedoutlier_renamed)[6:168], 58, 70)
+print(colnames(raw_unique_removedoutlier_renamed))
+sample_names <- str_extract(names(raw_unique_removedoutlier_renamed), "S[0-9]+")
+names(raw_unique_removedoutlier_renamed)[6:168] <- sample_names[6:168]
+print(colnames(raw_unique_removedoutlier_renamed))
+setdiff(Rename$AnalyticalSampleID, names(raw_unique_removedoutlier_renamed))
+for (i in 1:nrow(Rename)) {
+    current_col_title <- Rename$AnalyticalSampleID[i]
+    additional_info <- Rename$Sample_ID[i]
+    if (current_col_title %in% names(raw_unique_removedoutlier_renamed)) {
+        names(raw_unique_removedoutlier_renamed)[which(names(raw_unique_removedoutlier_renamed) == current_col_title)] <- additional_info
+    }
+}
+print(colnames(raw_unique_removedoutlier_renamed))
+
+### reorder columns
+# Ensure Rename$Sample_ID is a character vector
+Rename$Sample_ID <- as.character(Rename$Sample_ID)
+
+# Extract column names of log2_rename (from column 6 to 168)
+raw_colnames <- colnames(raw_unique_removedoutlier_renamed)[6:168]
+
+# Identify matching columns and reorder
+matched_cols <- intersect(Rename$Sample_ID, raw_colnames)
+
+# Ensure all columns are found
+if (length(matched_cols) != length(Rename$Sample_ID)) {
+    warning("Some columns in Rename$Sample_ID were not found in raw_unique_removedoutlier_renamed")
+}
+
+# Reorder only if all columns are matched
+if (length(matched_cols) == length(Rename$Sample_ID)) {
+    raw_unique_removedoutlier_renamed <- raw_unique_removedoutlier_renamed[, c(1:5, match(Rename$Sample_ID, colnames(raw_unique_removedoutlier_renamed)))]
+}
+
+print(colnames(raw_unique_removedoutlier_renamed))
+
+
+```
+
+
+```{r log2 transform data}
+
+# convert NA's and log2 transform the sample columns
+log2 <- raw_unique_removedoutlier
+log2[, 6:168] <- apply(raw_unique_removedoutlier[, 6:168], 2, function(x) {
+    x <- suppressWarnings(as.numeric(x))
+    ifelse(!is.na(x) & x > 0, log2(x), NA)})
+
+
+```
+
+
+```{r log 2- Rename columns}
+
+# rename columns
+print(colnames(log2))
+log2_renamed2 <- log2
+print(colnames(log2_renamed2))
+names(log2_renamed2)[6:168] <- substr(names(log2_renamed2)[6:168], 58, 70)
+print(colnames(log2_renamed2))
+sample_names <- str_extract(names(log2_renamed2), "S[0-9]+")
+names(log2_renamed2)[6:168] <- sample_names[6:168]
+print(colnames(log2_renamed2))
+setdiff(Rename$AnalyticalSampleID, names(log2_renamed2))
+for (i in 1:nrow(Rename)) {
+    current_col_title <- Rename$AnalyticalSampleID[i]
+    additional_info <- Rename$Sample_ID[i]
+    if (current_col_title %in% names(log2_renamed2)) {
+        names(log2_renamed2)[which(names(log2_renamed2) == current_col_title)] <- additional_info
+    }
+}
+print(colnames(log2_renamed2))
+log2_renamed <- log2_renamed2
+print(colnames(log2_renamed))
+
+
+### reorder columns
+# Ensure Rename$Sample_ID is a character vector
+Rename$Sample_ID <- as.character(Rename$Sample_ID)
+
+# Extract column names of log2_rename (from column 6 to 168)
+log2_colnames <- colnames(log2_renamed)[6:168]
+
+# Identify matching columns and reorder
+matched_cols <- intersect(Rename$Sample_ID, log2_colnames)
+
+# Ensure all columns are found
+if (length(matched_cols) != length(Rename$Sample_ID)) {
+    warning("Some columns in Rename$Sample_ID were not found in log2_rename")
+}
+
+# Reorder only if all columns are matched
+if (length(matched_cols) == length(Rename$Sample_ID)) {
+    log2_renamed <- log2_renamed[, c(1:5, match(Rename$Sample_ID, colnames(log2_renamed)))]
+}
+
+# Print to verify
+print(colnames(log2_renamed)[6:168])
+
+
+
+```
+
+
+```{r QC log2 data}
+
+# check normality
+samples_log2 <- log2_renamed[, 6:168]
+graphics::boxplot(samples_log2)
+
+
+
+###################### FIGURE 1G ###############################
+
+# variability in log2 data: CV plot
+data <- samples_log2
+cv_log2 <- data |>
+    dplyr::mutate(coefficient_variation = apply(data,
+                                                1,
+                                                FUN = function(x) sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE) * 100)) |>
+    dplyr::mutate(mean_LFQ = rowMeans(data, na.rm = TRUE))
+median_cv <- median(cv_log2$coefficient_variation, na.rm = TRUE)
+mean_cv <- mean(cv_log2$coefficient_variation, na.rm = TRUE)
+cat("Median CV:", median_cv, "\n")
+# Median CV: 4.523731
+cat("Mean CV:", mean_cv, "\n")
+# Mean CV: 6.081578 
+
+data_plot <- cv_log2 |>
+    tibble::rownames_to_column("Gene.name") |>
+    dplyr::mutate(perc_CVs = dplyr::case_when(
+        coefficient_variation <= 4.523731  ~ "under_median",
+        TRUE ~ "over_mean"
+    ))
+
+
+#table(data_plot$perc_CVs)
+#   over_mean under_mean
+#      1888       3670 
+
+cv <- data_plot |>
+    ggplot2::ggplot(
+        ggplot2::aes(x = mean_LFQ,
+                     y = coefficient_variation,
+                     color = perc_CVs)
+    ) +
+    ggplot2::geom_point(size = 0.5,
+                        alpha = 1,
+                        na.rm = TRUE) +
+    ggplot2::theme_classic() +
+    ggplot2::scale_color_manual(
+        values = c("dodgerblue4",
+                   "deepskyblue3")) +
+    coord_cartesian(xlim = c(0, 25), ylim = c(0, 100)) +
+    ggplot2::annotate(
+        geom = "text",
+        x = 20,
+        y = 9,
+        fontface = 1.5,
+        label = "Median %CV = 4.52",
+        size = 2
+    ) +
+    ggplot2::geom_hline(
+        yintercept = 4.52,
+        linetype = "dotted",
+        colour = "black",
+        size = 0.25
+    ) +
+    ggplot2::ylab("Mean coefficient of variation (%)") +
+    ggplot2::xlab("Mean Log2 intensities") +
+    ggplot2::theme(
+        text = ggplot2::element_text(face="bold", colour="black", size = 8),
+        legend.position = "none",
+    )
+
+cv
+
+
+
+################# FIGURE S1C ##################
+
+df <- rownames_log2_removed_outlier_renamed[, 6:168]
+colnames(df) <- Rename$label
+
+df_complete <- df[complete.cases(df), ]
+
+Rename_order <- Rename
+
+Rename_order$Combined <- factor(Rename_order$Combined, levels = c("LeanPreBasal", "LeanPreInsulin", "ObesePreBasal", "ObesePreInsulin", "T2DPreBasal", "T2DPreInsulin", "LeanPostBasal", "LeanPostInsulin", "ObesePostBasal", "ObesePostInsulin", "T2DPostBasal", "T2DPostInsulin"))
+
+order_indices <- order(Rename_order$Combined[match(colnames(df_complete), Rename_order$label)])
+df_complete_ordered <- df_complete[, order_indices]
+
+correlation_matrix <- cor(df_complete_ordered, method = "pearson")
+
+# Annotations
+Rename_order$Group <- ifelse(Rename_order$Group == "Lean", 1, ifelse(Rename_order$Group == "Obese", 2, ifelse(Rename_order$Group == "T2D", 3, Rename_order$Group)))
+Rename_order$Group <- as.numeric(Rename_order$Group)
+annotation_group <- data.frame(Group = Rename_order$Group)
+rownames(annotation_group) <- Rename_order$label
+
+Rename_order$Timepoint <- ifelse(Rename_order$Timepoint == "Pre", 1, ifelse(Rename_order$Timepoint == "Post", 2, Rename_order$Timepoint))
+Rename_order$Timepoint <- as.numeric(Rename_order$Timepoint)
+annotation_timepoint <- data.frame(Timepoint = Rename_order$Timepoint)
+rownames(annotation_timepoint) <- Rename_order$label
+
+Rename_order$Condition <- ifelse(Rename_order$Condition == "Basal", 1, ifelse(Rename_order$Condition == "Insulin", 2, Rename_order$Condition))
+Rename_order$Condition <- as.numeric(Rename_order$Condition)
+annotation_condition <- data.frame(Condition = Rename_order$Condition)
+rownames(annotation_condition) <- Rename_order$label
+
+annotation_col <- data.frame(
+    Timepoint = annotation_timepoint,
+    Group = annotation_group,
+    Condition = annotation_condition)
+
+pheatmap(correlation_matrix,
+         color = colorRampPalette(c("pink3" ,"lightpink1", "lightpink", "mistyrose", "white", "lightcyan", "lightskyblue1", "darkslateblue"))(100),
+         main = "Pearson Correlation Heatmap",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         scale = "none",
+         annotation_col = annotation_col,
+         annotation_colors = list(
+             Timepoint = c("1" = "plum1", "2" = "palegreen3"),
+             Group = c("1" = "deepskyblue4", "2" = "purple4", "3" = "maroon3"),
+             Condition = c("1" = "blue", "2" = "red")
+         ),
+         breaks = seq(0.75, 1, length.out = 100))
+
+
+# exclude diagonal elements
+correlation_values <- correlation_matrix[upper.tri(correlation_matrix)]
+
+# statistics
+min_corr <- min(correlation_values)
+max_corr <- max(correlation_values)
+median_corr <- median(correlation_values)
+mean_corr <- mean(correlation_values)
+
+print(paste("Minimum correlation:", min_corr))
+# "Minimum correlation: 0.935715872933297"
+print(paste("Maximum correlation:", max_corr))
+# "Maximum correlation: 0.993802205297297"
+print(paste("Median correlation:", median_corr))
+#  "Median correlation: 0.97547484166876"
+print(paste("Mean correlation:", mean_corr))
+# "Mean correlation: 0.97452892575214"
+
+```
+
+
+```{r filter}
+
+samples_log2_removedoutlier_renamed_filter50 <- selectOverallPercent(samples_log2, 0.5)
+# 5385
+
+```
+
+```{r median scaling}
+
+samples_log2_removedoutlier_renamed_filter50_median <- medianScaling(samples_log2_removedoutlier_renamed_filter50[1:ncol(samples_log2_removedoutlier_renamed_filter50)], scale = TRUE)
+samples_log2_removedoutlier_renamed_filter50_median_df <- as.data.frame(samples_log2_removedoutlier_renamed_filter50_median)
+
+graphics::boxplot(samples_log2_removedoutlier_renamed_filter50_median_df)
+
+```
+
+
+```{r batch correction}
+
+# batch correct for Beatbox batches
+# by generate a SummarizedExperiment object using metadata
+SE_samples_log2_removedoutlier_renamed_filter50_median <- PhosphoExperiment(assay = samples_log2_removedoutlier_renamed_filter50_median_df, colData=Rename)
+PCA_before <- plotMDS(assay(SE_samples_log2_removedoutlier_renamed_filter50_median), labels = SE_samples_log2_removedoutlier_renamed_filter50_median$BeatBoxBatch)
+SE_samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected <- SE_samples_log2_removedoutlier_renamed_filter50_median
+assay(SE_samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected) <- removeBatchEffect(assay(SE_samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected), batch = SE_samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected$BeatBoxBatch)
+PCA_after <- plotMDS(assay(SE_samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected), labels = SE_samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected$BeatBoxBatch)
+samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df <- as.data.frame(assay(SE_samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected))
+
+
+```
+
+```{r QC batch corrected data}
+
+
+##################### FIGURE 1I ########################
+
+# PCA on 100% filtered data
+complete_df <- samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df[complete.cases(samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df), ]
+complete_df_transposed <- t(complete_df)
+complete_df_transposed_df <- as.data.frame(complete_df_transposed)
+pca_object_complete <- prcomp(complete_df_transposed_df, scale = F)
+data_pca_complete <- pca_object_complete$x
+data_pca_complete <- as.data.frame(data_pca_complete)
+Rename$TrainingClamp <- paste(Rename$Timepoint, Rename$Condition, sep = "")
+data_pca_complete <- data_pca_complete |>
+    dplyr::select(PC1, PC2) |>
+    add_column(
+        Label = Rename$Sample_ID,
+        S = Rename$AnalyticalSampleID,
+        Training = Rename$Timepoint,
+        Clamp = Rename$Condition,
+        TrainingClamp = Rename$TrainingClamp,
+        GroupTimepoint = Rename$GroupTimepoint,
+        Group = Rename$Group,
+        ID = Rename$Sample_ID,
+        MSBatch = as.factor(Rename$MSBatch),
+        BeatboxBatch = as.factor(Rename$BeatBoxBatch),
+        Participant = as.factor(Rename$Participant)
+    )
+fviz_eig(pca_object_complete,
+         addlabels = T
+) +
+    theme_light() +
+    ggtitle("Eigenvalues 100% filtered") +
+    theme(plot.title = element_text(size = 16, face = "bold")) +
+    theme(plot.title = element_text(hjust = 0.5))
+
+x_limits <- c(-30, 30)
+y_limits <- c(-20, 20)
+
+pca_plot1 <- ggplot(
+    data_pca_complete,
+    aes(
+        x = PC1,
+        y = PC2,
+        shape = Training,
+        color = Group,
+        fill = GroupTimepoint
+    )
+) +
+    geom_point(aes(color = Group), size = 0.5) +  # Moved color mapping here
+    scale_shape_manual(values = c(19, 2)) +
+    scale_fill_manual(values = c("Lean_Pre" = "white", "Lean_Post" = "deepskyblue3", "Obese_Pre" = "white", "Obese_Post" = "mediumpurple4", "T2D_Pre" = "white", "T2D_Post" = "magenta3")) +
+    scale_color_manual(values = c("deepskyblue3", "mediumpurple4", "magenta3")) +
+    stat_ellipse(aes(linetype = Training), color = "grey30", geom = "polygon", type = "norm", fill = NA, size = 0.3) +
+    scale_linetype_manual(values = c("solid", "dotted")) +
+    theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    theme(panel.background = element_rect(fill = "white"),  # change background color
+          axis.line = element_line(color = "black"),  # add axis lines
+          panel.grid.major = element_line(color = "white"),  # add grid lines
+          axis.text.x = element_text(size = 6, angle = 0, hjust = 0),  # adjust x axis text
+          axis.text.y = element_text(size = 6, angle = 0, hjust = 0),  # adjust y axis text
+          axis.title.x = element_text(margin = margin(t = 2)),  # reduce distance for x axis title
+          axis.title.y = element_text(margin = margin(r = 2)),  # reduce distance for y axis title
+          text = element_text(size = 6),
+          legend.position = "none") +
+    labs(x = "PC 1 (11.4 %)", y = "PC 2 (10.1 %)")
+
+pca_plot1
+
+
+
+
+############################# FIGURE 1K ##########################
+
+# GSEA of PCA drivers
+
+# Loadings or rotation matrix obtained from PCA
+rotation_matrix <- pca_object_complete$rotation
+rotation_PC1_2 <- rotation_matrix[, 1:2]
+
+coord_list_PC1 <- rotation_PC1_2[, "PC1"]
+coord_list_PC2 <- rotation_PC1_2[, "PC2"]
+coord_list_PC1 <- coord_list_PC1[order(-coord_list_PC1)]
+coord_list_PC2 <- coord_list_PC2[order(-coord_list_PC2)]
+
+gsea_PC1 <- clusterProfiler::gseGO(
+    geneList = coord_list_PC1,
+    OrgDb = org.Hs.eg.db,
+    ont = "BP",
+    pvalueCutoff = 0.05,
+    keyType = "SYMBOL",
+    nPermSimple = 100000,
+    eps = 0)
+
+gsea_PC2 <- clusterProfiler::gseGO(
+    geneList = coord_list_PC2,
+    OrgDb = org.Hs.eg.db,
+    ont = "BP",
+    pvalueCutoff = 0.05,
+    keyType = "SYMBOL",
+    nPermSimple = 100000,
+    eps = 0)
+
+
+gsea_PC1_filtered <- clusterProfiler::simplify(gsea_PC1, cutoff = 0.7, by = "p.adjust", select_fun = min)
+clusterProfiler::dotplot(gsea_PC1_filtered, showCategory = 10, split = ".sign") + facet_grid(.~.sign) + ggtitle("GSEA PC1 coordinates")
+
+gsea_PC2_filtered <- clusterProfiler::simplify(gsea_PC2, cutoff = 0.7, by = "p.adjust", select_fun = min)
+clusterProfiler::dotplot(gsea_PC2_filtered, showCategory = 10, split = ".sign") + facet_grid(.~.sign) + ggtitle("GSEA PC2 coordinates")
+
+# Combine GSEA results into one data frame
+combinedgsea_PC <- list(`PC1`=gsea_PC1_filtered, `PC2`=gsea_PC2_filtered)
+combined_gsea_PC <- merge_result(combinedgsea_PC)
+
+d <- clusterProfiler::dotplot(combined_gsea_PC, showCategory=5, split=".Cluster") +
+    facet_grid(.~.sign) +
+    labs(x = expression(GeneRatio)) +
+    theme(axis.text.x = element_text(size = 6),
+          strip.text = element_text(size = 6),
+          axis.text.y = element_text(size = 6),
+          text = element_text(size = 6),
+          axis.title.x = element_text(size = 6),
+          plot.title = element_text(hjust = 0.5)) +
+    ggtitle("GSEA PC1 and PC2 coordinates") +
+    scale_fill_gradient(low = "paleturquoise3", high = "mediumpurple3")
+
+d
+
+
+```
+
+
+################# Differential expression analysis #################################
+
+
+```{r Differential expression analysis}
+
+# sanity check
+Rename_ordered <- Rename[match(colnames(samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df), Rename$Sample_ID), ]
+
+```
+
+
+```{r LIMMA_Preparation}
+
+Clamp <- factor(Rename$Condition, levels=c("Basal", "Insulin"))
+
+Group <- factor(Rename$Group, levels=c("Lean","Obese","T2D"))
+
+Training <- factor(Rename$Timepoint, levels=c("Pre", "Post"))
+
+Combined <- factor(Rename$Combined, levels = c("LeanPreBasal", "LeanPreInsulin", "LeanPostBasal", "LeanPostInsulin", "ObesePreBasal", "ObesePreInsulin", "ObesePostBasal", "ObesePostInsulin", "T2DPreBasal", "T2DPreInsulin", "T2DPostBasal", "T2DPostInsulin"))
+
+print(Rename$Sample_ID)
+
+```
+
+```{r Main_Effects}
+
+design <- model.matrix(~ Group * Training + Clamp)
+corfit <- duplicateCorrelation(samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df, design, block=Rename$Participant)
+corfit$consensus
+# 0.1512188
+fit <- lmFit(samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df, design, block=Rename$Participant, correlation=corfit$consensus)
+fit2 <- eBayes(fit)
+
+# main effect training
+table_MainEffect_Training <- topTable(fit2, coef = 4, number = Inf, sort.by = "logFC", adjust="fdr")
+table_MainEffect_Training$Protein <- rownames(table_MainEffect_Training)
+significant_adj <- table_MainEffect_Training[table_MainEffect_Training$adj.P.Val < 0.05, ]
+significant_topTable_adj_filtered <- na.omit(significant_adj)
+cat("Sig. proteins with training main effect: ", nrow(significant_topTable_adj_filtered), "\n")
+# 762
+
+# main effect clamp
+table_MainEffect_Clamp <- topTable(fit2, coef = 5, number = Inf, sort.by = "logFC", adjust="fdr")
+table_MainEffect_Clamp$Protein <- rownames(table_MainEffect_Clamp)
+significant_adj <- table_MainEffect_Clamp[table_MainEffect_Clamp$adj.P.Val < 0.05, ]
+significant_topTable_adj_filtered <- na.omit(significant_adj)
+cat("Sig. proteins with clamp main effect: ", nrow(significant_topTable_adj_filtered), "\n")
+# 11
+
+print(significant_topTable_adj_filtered)
+
+
+# QC
+limma::plotMA(fit2)
+hist(table_MainEffect_Training$P.Value, main = paste("Histogram of Main effect training P.Value"))
+hist(table_MainEffect_Clamp$P.Value, main = paste("Histogram of Main effect clamp P.Value"))
+
+
+
+```
+
+
+```{r Main_Effect_Volcanos}
+
+########################## FIGURE S3A #####################
+
+# Volcano training main effect
+
+# Count significantly upregulated and downregulated genes
+upregulated_count <- sum(table_MainEffect_Training$adj.P.Val < 0.05 & table_MainEffect_Training$logFC > 0)
+downregulated_count <- sum(table_MainEffect_Training$adj.P.Val < 0.05 & table_MainEffect_Training$logFC < 0)
+
+# Output the counts
+cat("Number of significantly upregulated proteins with training:", upregulated_count, "\n")
+# 432
+cat("Number of significantly downregulated proteins with training:", downregulated_count, "\n")
+# 330
+
+
+volcano_training <- function(.data) {
+    if("Protein" %in% colnames(.data)) {
+        data_volcano <- .data
+    } else {
+        data_volcano <- .data %>%
+            rownames_to_column("Protein")
+    }
+
+    data_volcano <- data_volcano %>%
+        dplyr::mutate(
+            significant = dplyr::case_when(
+                adj.P.Val < 0.05 & logFC > 0 ~ "significantly upregulated",
+                adj.P.Val < 0.05 & logFC < 0 ~ "significantly downregulated",
+                TRUE ~ "not significant"
+            )
+        )
+
+    p <- ggplot(data_volcano, aes(
+        x = logFC,
+        y = -log10(P.Value),
+        color = significant,
+        label = Protein
+    )) +
+        geom_point(size = 0.4, alpha = 0.7) +
+        scale_color_manual(values = c(
+            "not significant" = "grey",
+            "significantly downregulated" = "dodgerblue4",
+            "significantly upregulated" = "firebrick4"
+        ), name = "Significantly different") +
+        theme_classic() +
+        theme(
+            text = element_text(size = 6, colour = "black"),
+            legend.position = "none"
+        )
+
+    labels_to_show <- c(
+        "CD93","HK2", "PSMA4", "SLC2A4", "MYLK2", "COX2", "BCKDK", "PDK2", "MRPS15", "DEPTOR", "PRKAG2", "PRKAA1", "PRKAG3"
+
+    )
+
+    p <- p + ggrepel::geom_text_repel(
+        data = dplyr::filter(data_volcano, Protein %in% labels_to_show),
+        aes(
+            x = logFC,
+            y = -log10(P.Value),
+            label = Protein,
+            color = significant
+        ),
+        size = 1.5,
+        min.segment.length = unit(0.1, "lines"),
+        segment.size = unit(0.2, "mm"),
+        segment.color = "grey30",
+        force = 70,
+        max.overlaps = Inf
+    ) + scale_color_manual(values = c(
+        "not significant" = "grey",
+        "significantly downregulated" = "dodgerblue4",
+        "significantly upregulated" = "firebrick4"
+    ))
+
+    return(p)
+}
+
+v_training <- volcano_training(table_MainEffect_Training)
+v_training
+
+
+
+```
+
+
+
+```{r Specific_Contrast}
+
+design_combined <- model.matrix(~ 0 + Combined)
+corfit__combined <- duplicateCorrelation(samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df, design_combined, block=Rename$Participant)
+corfit__combined$consensus
+# 0.1492999
+fit_combined <- lmFit(samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df, design_combined, block=Rename$Participant, correlation=corfit__combined$consensus)
+
+
+cm_all <- makeContrasts(
+    # GROUP DIFFERENCES    
+        # T2D vs Lean in Pre conditions (basal and insulin states)
+    T2D_Lean_prebasal = CombinedT2DPreBasal - CombinedLeanPreBasal,
+    T2D_Lean_preinsulin = CombinedT2DPreInsulin - CombinedLeanPreInsulin,
+        # T2D vs Lean in Post conditions (basal and insulin states)
+    T2D_Lean_postbasal = CombinedT2DPostBasal - CombinedLeanPostBasal,
+    T2D_Lean_postinsulin = CombinedT2DPostInsulin - CombinedLeanPostInsulin,
+        # T2D vs Obese in Pre conditions (basal and insulin states)
+    T2D_Obese_prebasal = CombinedT2DPreBasal - CombinedObesePreBasal,
+    T2D_Obese_preinsulin = CombinedT2DPreInsulin - CombinedObesePreInsulin,
+        # T2D vs Obese in Post conditions (basal and insulin states)
+    T2D_Obese_postbasal = CombinedT2DPostBasal - CombinedObesePostBasal,
+    T2D_Obese_postinsulin = CombinedT2DPostInsulin - CombinedObesePostInsulin,
+        # Obese vs Lean in Pre conditions (basal and insulin states)
+    Obese_Lean_prebasal = CombinedObesePreBasal - CombinedLeanPreBasal,
+    Obese_Lean_preinsulin = CombinedObesePreInsulin - CombinedLeanPreInsulin,
+        # Obese vs Lean in Post conditions (basal and insulin states)
+    Obese_Lean_postbasal = CombinedObesePostBasal - CombinedLeanPostBasal,
+    Obese_Lean_postinsulin = CombinedObesePostInsulin - CombinedLeanPostInsulin,
+    
+    # TRAINING EFFECTS
+        # Training effect within Lean group basal state
+    Lean_trainingBasal = CombinedLeanPostBasal - CombinedLeanPreBasal,
+        # Training effect within Lean group insulin state
+    Lean_trainingInsulin = CombinedLeanPostInsulin - CombinedLeanPreInsulin,
+        # Training effect within Obese group basal state
+    Obese_trainingBasal = CombinedObesePostBasal - CombinedObesePreBasal,
+        # Training effect within Obese group insulin state
+    Obese_trainingInsulin = CombinedObesePostInsulin - CombinedObesePreInsulin,
+        # Training effect within T2D group basal state
+    T2D_trainingBasal = CombinedT2DPostBasal - CombinedT2DPreBasal,
+        # Training effect within T2D group insulin state
+    T2D_trainingInsulin = CombinedT2DPostInsulin - CombinedT2DPreInsulin,
+    
+    # CLAMP EFFECTS
+        # Pre-training clamp effect within Lean group
+    Lean_clamp_pre = CombinedLeanPreInsulin - CombinedLeanPreBasal,
+        # Post-training clamp effect within Lean group
+    Lean_clamp_post = CombinedLeanPostInsulin - CombinedLeanPostBasal,
+        # Pre-training clamp effect within Obese group
+    Obese_clamp_pre = CombinedObesePreInsulin - CombinedObesePreBasal,
+        # Post-training clamp effect within Obese group
+    Obese_clamp_post = CombinedObesePostInsulin - CombinedObesePostBasal,
+        # Pre-training clamp effect within T2D group
+    T2D_clamp_pre = CombinedT2DPreInsulin - CombinedT2DPreBasal,
+        # Post-training clamp effect within T2D group
+    T2D_clamp_post = CombinedT2DPostInsulin - CombinedT2DPostBasal,
+    
+    levels = design_combined
+)
+
+fit2_combined <- eBayes(contrasts.fit(fit_combined, cm_all))
+
+
+# Define a function to extract the full table and count significant hits for a given comparison
+extract_and_store_full_table <- function(fit, comparison_name, p_value_threshold = 0.05) {
+    full_table <- limma::topTable(fit,
+                                  coef = comparison_name,
+                                  adjust = "BH",
+                                  number = Inf)
+    full_table$Protein <- rownames(full_table)
+    significant_table <- full_table[full_table$adj.P.Val < p_value_threshold, ]
+    significant_table <- na.omit(significant_table)
+    cat("Comparison:", comparison_name, " - Number of significant hits:", nrow(significant_table), "\n")
+    assign(paste0(comparison_name), full_table, envir = .GlobalEnv)
+    return(nrow(significant_table))
+}
+
+comparisons <- c("T2D_Lean_prebasal", "T2D_Lean_preinsulin", 
+                 "T2D_Lean_postbasal", "T2D_Lean_postinsulin", 
+                 "T2D_Obese_prebasal", "T2D_Obese_preinsulin", 
+                 "T2D_Obese_postbasal", "T2D_Obese_postinsulin", 
+                 "Obese_Lean_prebasal", "Obese_Lean_preinsulin", 
+                 "Obese_Lean_postbasal", "Obese_Lean_postinsulin", 
+                 "Lean_trainingBasal", "Lean_trainingInsulin", 
+                 "Obese_trainingBasal", "Obese_trainingInsulin", 
+                 "T2D_trainingBasal", "T2D_trainingInsulin", 
+                 "Lean_clamp_pre", "Lean_clamp_post", 
+                 "Obese_clamp_pre", "Obese_clamp_post", 
+                 "T2D_clamp_pre", "T2D_clamp_post")
+
+for (comparison in comparisons) {
+    extract_and_store_full_table(fit2_combined, comparison)
+}
+
+
+
+# QC
+limma::plotMA(fit2_combined)
+for (comparison in comparisons) {
+  comparison_data <- get(comparison)
+  hist(comparison_data$P.Value, 
+       main = paste("Histogram of", comparison, "P.Value"),
+       xlab = "P-Value", 
+       col = "lightpink", 
+       border = "black")
+}
+
+
+
+
+
+# raw p value
+extract_and_store_full_table <- function(fit, comparison_name, p_value_threshold = 0.05) {
+    full_table <- limma::topTable(fit,
+                                  coef = comparison_name,
+                                  adjust = "BH",
+                                  number = Inf)
+    full_table$Protein <- rownames(full_table)
+    significant_table <- full_table[full_table$P.Value < p_value_threshold, ]
+    significant_table <- na.omit(significant_table)
+    cat("Comparison:", comparison_name, " - Number of significant hits:", nrow(significant_table), "\n")
+    assign(paste0(comparison_name), full_table, envir = .GlobalEnv)
+    return(nrow(significant_table))
+}
+
+comparisons <- c("T2D_Lean_prebasal", "T2D_Lean_preinsulin", 
+                 "T2D_Lean_postbasal", "T2D_Lean_postinsulin", 
+                 "T2D_Obese_prebasal", "T2D_Obese_preinsulin", 
+                 "T2D_Obese_postbasal", "T2D_Obese_postinsulin", 
+                 "Obese_Lean_prebasal", "Obese_Lean_preinsulin", 
+                 "Obese_Lean_postbasal", "Obese_Lean_postinsulin", 
+                 "Lean_trainingBasal", "Lean_trainingInsulin", 
+                 "Obese_trainingBasal", "Obese_trainingInsulin", 
+                 "T2D_trainingBasal", "T2D_trainingInsulin", 
+                 "Lean_clamp_pre", "Lean_clamp_post", 
+                 "Obese_clamp_pre", "Obese_clamp_post", 
+                 "T2D_clamp_pre", "T2D_clamp_post")
+
+for (comparison in comparisons) {
+    extract_and_store_full_table(fit2_combined, comparison)
+}
+
+
+
+
+```
+
+
+```{r Group comparisons pre basal}
+
+################## FIGURE 2A ################################
+########## 2D plots, group comparison, Pre Basal
+
+## T2D and Obese compared to Lean
+
+all_logFC_toLean <- data.frame(
+  Protein = Obese_Lean_prebasal$Protein,
+  logFC_T2D = T2D_Lean_prebasal$logFC[match(Obese_Lean_prebasal$Protein, T2D_Lean_prebasal$Protein)],
+  logFC_Obese = Obese_Lean_prebasal$logFC,
+  adjP_T2D = T2D_Lean_prebasal$adj.P.Val[match(Obese_Lean_prebasal$Protein, T2D_Lean_prebasal$Protein)],
+  adjP_Obese = Obese_Lean_prebasal$adj.P.Val,
+  adjP_ObeseT2D = T2D_Obese_prebasal$adj.P.Val[match(Obese_Lean_prebasal$Protein, T2D_Obese_prebasal$Protein)]
+)
+
+all_logFC_toLean$color <- ifelse(all_logFC_toLean$adjP_ObeseT2D < 0.05, "maroon",
+                                 ifelse(all_logFC_toLean$adjP_ObeseT2D < 0.1, "deepskyblue",
+                                 ifelse(all_logFC_toLean$adjP_T2D < 0.05, "purple3",
+                                 ifelse(all_logFC_toLean$adjP_T2D < 0.1, "blue", "grey"))))
+table(all_logFC_toLean$color)
+#         grey blue       purple3 
+   #      5367            16             2 
+
+grey_data <- all_logFC_toLean %>% filter(color == "grey")
+colored_data <- all_logFC_toLean %>% filter(color %in% c("maroon", "purple3", "plum42", "blue"))
+
+all_logFC_toLean <- all_logFC_toLean %>%
+  mutate(plot_order = ifelse(color == "grey", 1, ifelse(color == "blue", 2, 3))) %>%
+  arrange(plot_order)
+
+proteins_to_label <- c("ILVBL", "GATD3B", "MT-CO3", "SLC25A12", "MT-CO1", "COX6A2", "CYC1", "MRPL46", "GPT", "BCKDHB", "MRPL20", "NUP98", "FH", "CDK2", "WASHC4", "BDH1", "CHCHD7", "DDAH1")
+
+all_logFC_toLean <- all_logFC_toLean %>%
+  mutate(label = ifelse(Protein %in% proteins_to_label, Protein, NA))
+
+final_plot <- ggplot(all_logFC_toLean, aes(x = logFC_T2D, y = logFC_Obese, color = color, fill = color)) +
+  geom_point(size = 0.5, alpha = 0.6, stroke = 0.5, shape = ifelse(all_logFC_toLean$color == "grey", 4, 1)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "mediumpurple2", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "maroon3", alpha = 0.5) +
+  scale_color_manual(values = c("grey" = "grey", "maroon" = "maroon", "purple3" = "purple3", 
+                                "deepskyblue" = "deepskyblue",  "blue" =  "blue")) +  # Ensure correct color assignment
+  scale_fill_manual(values = c("grey" = "grey", "maroon" = "maroon", "purple3" = "purple3", 
+                               "deepskyblue" = "deepskyblue",  "blue" =  "blue")) +  # Match fill colors with color
+  theme_classic() +
+  theme(
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    plot.title = element_text(size = 6),
+    legend.position = "none"
+  ) +
+  ggrepel::geom_text_repel(
+    aes(label = label), 
+    size = 1.5,
+    min.segment.length = unit(0.1, "lines"),
+    segment.size = unit(0.2, "mm"),
+    segment.color = "grey30",
+    force = 70,
+    max.overlaps = Inf
+  )
+
+final_plot
+
+
+cor.test(all_logFC_toLean$logFC_T2D, all_logFC_toLean$logFC_Obese, use = "complete.obs", method = "pearson")
+
+
+
+
+
+
+
+
+## Obese and Lean compared to T2D
+
+all_logFC_toT2D <- data.frame(
+  Protein = T2D_Obese_prebasal$Protein,
+  logFC_Lean = T2D_Lean_prebasal$logFC[match(T2D_Obese_prebasal$Protein, T2D_Lean_prebasal$Protein)],
+  logFC_Obese = T2D_Obese_prebasal$logFC,
+  adjP_Lean = T2D_Lean_prebasal$adj.P.Val[match(T2D_Obese_prebasal$Protein, T2D_Lean_prebasal$Protein)],
+  adjP_Obese = T2D_Obese_prebasal$adj.P.Val,
+  adjP_ObeseLean = Obese_Lean_prebasal$adj.P.Val[match(T2D_Obese_prebasal$Protein, Obese_Lean_prebasal$Protein)]
+)
+
+# Applying the new color scheme logic
+all_logFC_toT2D$color <- ifelse(all_logFC_toT2D$adjP_Obese < 0.05, "maroon",
+                                ifelse(all_logFC_toT2D$adjP_Obese < 0.1, "deepskyblue",
+                                ifelse(all_logFC_toT2D$adjP_Lean < 0.05, "purple3",
+                                ifelse(all_logFC_toT2D$adjP_Lean < 0.1, "blue", "grey"))))
+
+
+grey_data <- all_logFC_toT2D %>% filter(color == "grey")
+colored_data <- all_logFC_toT2D %>% filter(color %in% c("maroon", "purple3", "deepskyblue", "blue"))
+
+all_logFC_toT2D <- all_logFC_toT2D %>%
+  mutate(plot_order = ifelse(color == "grey", 1, ifelse(color == "blue", 2, 3))) %>%
+  arrange(plot_order)
+
+proteins_to_label <- c("ILVBL", "GATD3B", "MT-CO3", "SLC25A12", "MT-CO1", "COX6A2", "CYC1", "MRPL46", "GPT", "BCKDHB", "MRPL20", "NUP98", "FH", "CDK2", "WASHC4", "BDH1", "CHCHD7", "DDAH1")
+
+all_logFC_toT2D <- all_logFC_toT2D %>%
+  mutate(label = ifelse(Protein %in% proteins_to_label, Protein, NA))
+
+final_plot_T2D <- ggplot(all_logFC_toT2D, aes(x = logFC_Lean, y = logFC_Obese, color = color, fill = color)) +
+  geom_point(size = 0.5, alpha = 0.6, stroke = 0.5, shape = ifelse(all_logFC_toT2D$color == "grey", 4, 1)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "mediumpurple2", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "maroon3", alpha = 0.5) +
+  scale_color_manual(values = c("grey" = "grey", "maroon" = "maroon", "purple3" = "purple3", 
+                                "deepskyblue" = "deepskyblue", "blue" = "blue")) +  # Correct color assignment
+  scale_fill_manual(values = c("grey" = "grey", "maroon" = "maroon", "purple3" = "purple3", 
+                               "deepskyblue" = "deepskyblue", "blue" = "blue")) +  # Correct fill assignment
+  theme_classic() +
+  theme(
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    plot.title = element_text(size = 6),
+    legend.position = "none"
+  ) +
+  ggrepel::geom_text_repel(
+    aes(label = label), 
+    size = 1.5,
+    min.segment.length = unit(0.1, "lines"),
+    segment.size = unit(0.2, "mm"),
+    segment.color = "grey30",
+    force = 70,
+    max.overlaps = Inf
+  )
+
+final_plot_T2D
+
+
+
+cor.test(all_logFC_toT2D$logFC_Lean, all_logFC_toT2D$logFC_Obese, use = "complete.obs", method = "pearson")
+
+
+
+## T2D and Obese compared to Lean
+
+all_logFC_toLean <- data.frame(
+  Protein = Obese_Lean_prebasal$Protein,
+  logFC_T2D = T2D_Lean_prebasal$logFC[match(Obese_Lean_prebasal$Protein, T2D_Lean_prebasal$Protein)],
+  logFC_Obese = Obese_Lean_prebasal$logFC,
+  adjP_T2D = T2D_Lean_prebasal$adj.P.Val[match(Obese_Lean_prebasal$Protein, T2D_Lean_prebasal$Protein)],
+  adjP_Obese = Obese_Lean_prebasal$adj.P.Val,
+  adjP_ObeseT2D = T2D_Obese_prebasal$adj.P.Val[match(Obese_Lean_prebasal$Protein, T2D_Obese_prebasal$Protein)]
+)
+
+# Add new colors for significance < 0.2
+all_logFC_toLean$color <- ifelse(all_logFC_toLean$adjP_ObeseT2D < 0.05, "darkred",
+                          ifelse(all_logFC_toLean$adjP_ObeseT2D < 0.1, "maroon3",
+                          ifelse(all_logFC_toLean$adjP_ObeseT2D < 0.2, "plum4",
+                          ifelse(all_logFC_toLean$adjP_T2D < 0.05, "blue3",
+                          ifelse(all_logFC_toLean$adjP_T2D < 0.1, "purple",
+                          ifelse(all_logFC_toLean$adjP_T2D < 0.2, "deepskyblue3", "grey"))))))
+
+table(all_logFC_toLean$color)
+
+# Arrange for plotting order
+all_logFC_toLean <- all_logFC_toLean %>%
+  mutate(plot_order = ifelse(color == "grey", 1, ifelse(color == "blue3" | color == "deepskyblue3", 2, 3))) %>%
+  arrange(plot_order)
+
+# Label proteins with adjusted p-value < 0.05
+all_logFC_toLean <- all_logFC_toLean %>%
+  mutate(label = ifelse(adjP_ObeseT2D < 0.05 | adjP_T2D < 0.05| adjP_ObeseT2D < 0.1| adjP_T2D < 0.1, Protein, NA))
+
+# Generate plot
+final_plot <- ggplot(all_logFC_toLean, aes(x = logFC_T2D, y = logFC_Obese, color = color, fill = color)) +
+  geom_point(size = 0.5, alpha = 0.6, stroke = 0.5, shape = ifelse(all_logFC_toLean$color == "grey", 4, 1)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "mediumpurple2", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "maroon3", alpha = 0.5) +
+  scale_color_manual(values = c("grey" = "grey", "maroon3" = "maroon3", "purple" = "purple3", 
+                                "deepskyblue3" = "deepskyblue4", "blue3" = "blue3", 
+                                "plum4" = "plum4", "darkred" = "darkred")) +  
+  scale_fill_manual(values = c("grey" = "grey", "maroon" = "maroon", "purple" = "purple3", 
+                               "deepskyblue3" = "deepskyblue4", "blue3" = "blue3", 
+                               "plum4" = "plum4", "darkred" = "darkred")) +  
+  theme_classic() +
+  theme(
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    plot.title = element_text(size = 6),
+    legend.position = "none"
+  ) +
+  ggrepel::geom_text_repel(
+    aes(label = label), 
+    size = 2,
+    min.segment.length = unit(0.1, "lines"),
+    segment.size = unit(0.2, "mm"),
+    segment.color = "grey30",
+    force = 70,
+    max.overlaps = Inf
+  )
+
+final_plot
+
+
+
+
+## Obese and Lean compared to T2D
+
+all_logFC_toT2D <- data.frame(
+  Protein = T2D_Obese_prebasal$Protein,
+  logFC_Lean = T2D_Lean_prebasal$logFC[match(T2D_Obese_prebasal$Protein, T2D_Lean_prebasal$Protein)],
+  logFC_Obese = T2D_Obese_prebasal$logFC,
+  adjP_Lean = T2D_Lean_prebasal$adj.P.Val[match(T2D_Obese_prebasal$Protein, T2D_Lean_prebasal$Protein)],
+  adjP_Obese = T2D_Obese_prebasal$adj.P.Val,
+  adjP_ObeseLean = Obese_Lean_prebasal$adj.P.Val[match(T2D_Obese_prebasal$Protein, Obese_Lean_prebasal$Protein)]
+)
+
+# Updated color scheme with < 0.2 significance
+all_logFC_toT2D$color <- ifelse(all_logFC_toT2D$adjP_Obese < 0.05, "darkred",
+                         ifelse(all_logFC_toT2D$adjP_Obese < 0.1, "maroon3",
+                         ifelse(all_logFC_toT2D$adjP_Obese < 0.2, "plum4",
+                         ifelse(all_logFC_toT2D$adjP_Lean < 0.05, "blue3",
+                         ifelse(all_logFC_toT2D$adjP_Lean < 0.1, "purple",
+                         ifelse(all_logFC_toT2D$adjP_Lean < 0.2, "deepskyblue3", "grey"))))))
+
+table(all_logFC_toT2D$color)
+
+# Arrange for plotting order
+all_logFC_toT2D <- all_logFC_toT2D %>%
+  mutate(plot_order = ifelse(color == "grey", 1, ifelse(color == "blue3" | color == "deepskyblue3", 2, 3))) %>%
+  arrange(plot_order)
+
+# Label proteins with adjusted p-value < 0.05
+all_logFC_toT2D <- all_logFC_toT2D %>%
+  mutate(label = ifelse(adjP_Obese < 0.05 | adjP_Lean < 0.05|adjP_Obese < 0.1 | adjP_Lean < 0.1, Protein, NA))
+
+# Generate plot
+final_plot_T2D <- ggplot(all_logFC_toT2D, aes(x = logFC_Lean, y = logFC_Obese, color = color, fill = color)) +
+  geom_point(size = 0.5, alpha = 0.6, stroke = 0.5, shape = ifelse(all_logFC_toT2D$color == "grey", 4, 1)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "mediumpurple2", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "maroon3", alpha = 0.5) +
+  scale_color_manual(values = c("grey" = "grey", "maroon3" = "maroon3", "purple" = "purple3", 
+                                "deepskyblue3" = "deepskyblue4", "blue3" = "blue3", 
+                                "plum4" = "plum4", "darkred" = "darkred")) +  
+  scale_fill_manual(values = c("grey" = "grey", "maroon" = "maroon", "purple" = "purple3", 
+                               "deepskyblue3" = "deepskyblue4", "blue3" = "blue3", 
+                               "plum4" = "plum4", "darkred" = "darkred")) +  
+  theme_classic() +
+  theme(
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    plot.title = element_text(size = 6),
+    legend.position = "none"
+  ) +
+  ggrepel::geom_text_repel(
+    aes(label = label), 
+    size = 2,
+    min.segment.length = unit(0.1, "lines"),
+    segment.size = unit(0.2, "mm"),
+    segment.color = "grey30",
+    force = 70,
+    max.overlaps = Inf
+  )
+
+final_plot_T2D
+
+
+
+
+```
+
+
+
+
+
+```{r Group comparisons - intra-group variability of proteins diff at baseline (raw p<0.05)}
+
+
+######################## FIGURE S2A #################################
+
+
+# Step 1: Collect all significant proteins from the pre-training basal comparisons
+sig_proteins_pre_basal <- unique(c(
+  T2D_Lean_prebasal %>% filter(P.Value < 0.05) %>% pull(Protein),
+  T2D_Obese_prebasal %>% filter(P.Value < 0.05) %>% pull(Protein),
+  Obese_Lean_prebasal %>% filter(P.Value < 0.05) %>% pull(Protein)
+))
+# 953
+
+# Step 2: Extract expression matrix for Basal Pre samples only
+pre_basal_samples <- Rename %>%
+  filter(Timepoint == "Pre", Condition == "Basal")
+# Ensure Sample_IDs are characters to match colnames
+pre_basal_samples$Sample_ID <- as.character(pre_basal_samples$Sample_ID)
+
+# Also ensure column names are characters (they should be by default)
+colnames(proteome_dataset) <- as.character(colnames(proteome_dataset))
+
+# Now subset
+pre_basal_expr <- proteome_dataset[, pre_basal_samples$Sample_ID]
+
+# Subset the matrix to only include significant proteins
+pre_basal_expr_sig <- pre_basal_expr[rownames(pre_basal_expr) %in% sig_proteins_pre_basal, ]
+
+# Step 3: Add group information
+group_info <- data.frame(
+  Sample_ID = pre_basal_samples$Sample_ID,
+  Group = pre_basal_samples$Group
+)
+
+# Step 4: Transpose for easy manipulation (samples as rows, proteins as columns)
+expr_df <- as.data.frame(t(pre_basal_expr_sig))
+expr_df$Sample_ID <- rownames(expr_df)
+
+# Add group labels
+expr_df <- left_join(expr_df, group_info, by = "Sample_ID")
+
+# Step 5: Reshape and compute SD per protein per group
+
+expr_long <- expr_df %>%
+  pivot_longer(cols = all_of(sig_proteins_pre_basal), names_to = "Protein", values_to = "Expression")
+
+# Calculate standard deviation within each group for each protein
+intragroup_sd <- expr_long %>%
+  group_by(Group, Protein) %>%
+  summarise(SD = sd(Expression, na.rm = TRUE), .groups = "drop")
+
+
+
+
+# Compute group-wise summary stats
+group_sd_summary <- intragroup_sd %>%
+  group_by(Group) %>%
+  summarise(
+    mean_SD = mean(SD, na.rm = TRUE),
+    median_SD = median(SD, na.rm = TRUE)
+  )
+
+
+print(group_sd_summary)
+
+plot_intragroup_sd <- ggplot(intragroup_sd, aes(x = Group, y = SD)) +
+  geom_boxplot(outlier.shape = NA, fill = "white", color = "black") +
+  geom_jitter(width = 0.2, alpha = 0.2, size = 0.05, aes(color = Group)) +
+  geom_text(data = group_sd_summary,
+            aes(x = Group, y = max(intragroup_sd$SD, na.rm = TRUE) * 0.95,
+                label = paste0("Mean: ", round(mean_SD, 2), "\nMedian: ", round(median_SD, 2))),
+            size = 2.5, vjust = -0.5, hjust = 0.5, color = "black") +
+  scale_color_manual(values = c("Lean" = "deepskyblue4", "Obese" = "purple4", "T2D" = "maroon3")) +
+  labs(
+    title = "Intra-group variability (SD) of significantly regulated Pre-Basal proteins",
+    x = "Group",
+    y = "Standard Deviation (per protein)"
+  ) +
+  theme_classic(base_size = 6) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(size = 6, face = "bold"),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6)
+  )
+
+plot_intragroup_sd
+
+ggsave(plot = plot_intragroup_sd,
+       filename = here::here("doc/intragroup_SD_p0.05.pdf"),
+       units = "mm",
+       height = 60,
+       width = 25)
+
+############## statistics
+
+# Reshape to wide format (each protein = one row, groups = columns)
+sd_wide <- intragroup_sd %>%
+  pivot_wider(names_from = Group, values_from = SD)
+
+# Compute paired differences
+sd_wide <- sd_wide %>%
+  mutate(
+    diff_T2D_Lean = T2D - Lean,
+    diff_T2D_Obese = T2D - Obese,
+    diff_Obese_Lean = Obese - Lean
+  )
+
+# Shapiro-Wilk normality checks
+shapiro.test(sd_wide$diff_T2D_Lean)     # p = 0.91 → normal
+shapiro.test(sd_wide$diff_Obese_Lean)   # p = 0.037 → not normal
+shapiro.test(sd_wide$diff_T2D_Obese)    # p = 3.3e-06 → not normal
+
+# Use Wilcoxon signed-rank test for all (consistent approach)
+wilcox_T2D_vs_Lean <- wilcox.test(sd_wide$T2D, sd_wide$Lean, paired = TRUE)
+wilcox_Obese_vs_Lean <- wilcox.test(sd_wide$Obese, sd_wide$Lean, paired = TRUE)
+wilcox_T2D_vs_Obese <- wilcox.test(sd_wide$T2D, sd_wide$Obese, paired = TRUE)
+
+# Print test results
+print(wilcox_T2D_vs_Lean)
+print(wilcox_Obese_vs_Lean)
+print(wilcox_T2D_vs_Obese)
+
+
+```
+
+
+
+```{r Venn diagrams training}
+
+############################ FIGURE 3B ###############################
+
+#### Venn diagram - training effects
+
+
+regulated <- list(Lean = Lean_trainingBasal$Protein[Lean_trainingBasal$adj.P.Val<0.05],
+                    Obese = Obese_trainingBasal$Protein[Obese_trainingBasal$adj.P.Val<0.05],
+                    T2D = T2D_trainingBasal$Protein[T2D_trainingBasal$adj.P.Val<0.05])
+venn_counts <- euler(regulated)
+p1<- plot(venn_counts, counts = TRUE, quantities = TRUE, main = "Regulated proteins Training (basal), adj.Pval<0.05")
+p1
+
+
+upregulated <- list(Lean = Lean_trainingBasal$Protein[Lean_trainingBasal$logFC > 0 & Lean_trainingBasal$adj.P.Val<0.05],
+                    Obese = Obese_trainingBasal$Protein[Obese_trainingBasal$logFC > 0 & Obese_trainingBasal$adj.P.Val<0.05],
+                    T2D = T2D_trainingBasal$Protein[T2D_trainingBasal$logFC > 0 & T2D_trainingBasal$adj.P.Val<0.05])
+venn_counts <- euler(upregulated)
+p2<-plot(venn_counts, counts = TRUE, quantities = TRUE, main = "Upregulated proteins Training (basal), adj.Pval<0.05")
+p2
+
+downregulated <- list(Lean = Lean_trainingBasal$Protein[Lean_trainingBasal$logFC < 0 & Lean_trainingBasal$adj.P.Val<0.05],
+                    Obese = Obese_trainingBasal$Protein[Obese_trainingBasal$logFC < 0 & Obese_trainingBasal$adj.P.Val<0.05],
+                    T2D = T2D_trainingBasal$Protein[T2D_trainingBasal$logFC < 0 & T2D_trainingBasal$adj.P.Val<0.05])
+venn_counts <- euler(downregulated)
+p3<-plot(venn_counts, counts = TRUE, quantities = TRUE, main = "Downregulated proteins Training (basal), adj.Pval<0.05")
+p3
+
+
+length(Lean_trainingBasal$Protein[Lean_trainingBasal$logFC > 0 & Lean_trainingBasal$adj.P.Val<0.1])
+length(Lean_trainingBasal$Protein[Lean_trainingBasal$logFC < 0 & Lean_trainingBasal$adj.P.Val<0.1])
+length(Lean_trainingBasal$Protein[Lean_trainingBasal$logFC > 0 & Lean_trainingBasal$adj.P.Val<0.05])
+length(Lean_trainingBasal$Protein[Lean_trainingBasal$logFC < 0 & Lean_trainingBasal$adj.P.Val<0.05])
+length(Lean_trainingBasal$Protein[Lean_trainingBasal$adj.P.Val >= 0.1])
+
+length(Obese_trainingBasal$Protein[Obese_trainingBasal$logFC > 0 & Obese_trainingBasal$adj.P.Val < 0.1])
+length(Obese_trainingBasal$Protein[Obese_trainingBasal$logFC < 0 & Obese_trainingBasal$adj.P.Val < 0.1])
+length(Obese_trainingBasal$Protein[Obese_trainingBasal$logFC > 0 & Obese_trainingBasal$adj.P.Val < 0.05])
+length(Obese_trainingBasal$Protein[Obese_trainingBasal$logFC < 0 & Obese_trainingBasal$adj.P.Val < 0.05])
+length(Obese_trainingBasal$Protein[Obese_trainingBasal$adj.P.Val >= 0.1])
+
+length(T2D_trainingBasal$Protein[T2D_trainingBasal$logFC > 0 & T2D_trainingBasal$adj.P.Val < 0.1])
+length(T2D_trainingBasal$Protein[T2D_trainingBasal$logFC < 0 & T2D_trainingBasal$adj.P.Val < 0.1])
+length(T2D_trainingBasal$Protein[T2D_trainingBasal$logFC > 0 & T2D_trainingBasal$adj.P.Val < 0.05])
+length(T2D_trainingBasal$Protein[T2D_trainingBasal$logFC < 0 & T2D_trainingBasal$adj.P.Val < 0.05])
+length(T2D_trainingBasal$Protein[T2D_trainingBasal$adj.P.Val >= 0.1])
+
+
+#[1] 302
+#[1] 306
+#[1] 130
+#[1] 154
+#[1] 4777
+
+#[1] 400
+#[1] 356
+#[1] 252
+#[1] 224
+#[1] 4629
+
+#[1] 460
+#[1] 447
+#[1] 295
+#[1] 272
+#[1] 4478
+
+
+
+```
+
+
+```{r ORA training specific per group}
+
+
+
+# Define lists for upregulated proteins
+upregulated <- list(
+  Lean = Lean_trainingBasal$Protein[Lean_trainingBasal$logFC > 0 & Lean_trainingBasal$adj.P.Val < 0.05],
+  Obese = Obese_trainingBasal$Protein[Obese_trainingBasal$logFC > 0 & Obese_trainingBasal$adj.P.Val < 0.05],
+  T2D = T2D_trainingBasal$Protein[T2D_trainingBasal$logFC > 0 & T2D_trainingBasal$adj.P.Val < 0.05]
+)
+
+# Extract uniquely upregulated proteins
+unique_upregulated <- list(
+  Lean = setdiff(upregulated$Lean, c(upregulated$Obese, upregulated$T2D)),
+  Obese = setdiff(upregulated$Obese, c(upregulated$Lean, upregulated$T2D)),
+  T2D = setdiff(upregulated$T2D, c(upregulated$Lean, upregulated$Obese))
+)
+
+# Define lists for downregulated proteins
+downregulated <- list(
+  Lean = Lean_trainingBasal$Protein[Lean_trainingBasal$logFC < 0 & Lean_trainingBasal$adj.P.Val < 0.05],
+  Obese = Obese_trainingBasal$Protein[Obese_trainingBasal$logFC < 0 & Obese_trainingBasal$adj.P.Val < 0.05],
+  T2D = T2D_trainingBasal$Protein[T2D_trainingBasal$logFC < 0 & T2D_trainingBasal$adj.P.Val < 0.05]
+)
+
+# Extract uniquely downregulated proteins
+unique_downregulated <- list(
+  Lean = setdiff(downregulated$Lean, c(downregulated$Obese, downregulated$T2D)),
+  Obese = setdiff(downregulated$Obese, c(downregulated$Lean, downregulated$T2D)),
+  T2D = setdiff(downregulated$T2D, c(downregulated$Lean, downregulated$Obese))
+)
+
+# === Step 2: ORA Analysis ===
+# Function to perform ORA
+perform_ORA <- function(gene_list, universe_genes, ontology = "ALL") {
+  if (length(gene_list) == 0) return(NULL)  # Skip if list is empty
+
+  # Convert to Entrez IDs
+  entrez_genes <- bitr(gene_list, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+  entrez_universe <- bitr(universe_genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+  # Run ORA
+  enrich_res <- enrichGO(
+    gene          = entrez_genes$ENTREZID,
+    universe      = entrez_universe$ENTREZID,
+    OrgDb         = org.Hs.eg.db,
+    keyType       = "ENTREZID",
+    ont           = ontology,  # "BP" for Biological Process
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05,
+    readable      = TRUE
+  )
+
+  return(enrich_res)
+}
+
+# Define gene universe (all detected proteins)
+gene_universe <- unique(c(Lean_trainingBasal$Protein, Obese_trainingBasal$Protein, T2D_trainingBasal$Protein))
+
+# Perform ORA for uniquely upregulated proteins
+ora_upregulated <- list(
+  Lean = perform_ORA(unique_upregulated$Lean, gene_universe),
+  Obese = perform_ORA(unique_upregulated$Obese, gene_universe),
+  T2D = perform_ORA(unique_upregulated$T2D, gene_universe)
+)
+
+# Perform ORA for uniquely downregulated proteins
+ora_downregulated <- list(
+  Lean = perform_ORA(unique_downregulated$Lean, gene_universe),
+  Obese = perform_ORA(unique_downregulated$Obese, gene_universe),
+  T2D = perform_ORA(unique_downregulated$T2D, gene_universe)
+)
+
+# === Step 3: Plot ORA Results ===
+
+# Function to extract ORA results as a dataframe
+extract_ora_df <- function(ora_result) {
+  if (is.null(ora_result)) return(NULL)  # Skip if no enrichment
+
+  df <- as.data.frame(ora_result)
+  
+  if (nrow(df) == 0) return(NULL)  # Skip if no significant terms
+
+  # Extract necessary columns
+  df_filtered <- df %>%
+    dplyr::select(Description, GeneRatio, p.adjust, Count) %>%
+    mutate(GeneRatio = as.numeric(sub("/.*", "", GeneRatio)) / as.numeric(sub(".*/", "", GeneRatio)))  # Convert GeneRatio to numeric
+
+  return(df_filtered)
+}
+
+# Extract data for each ORA result
+ora_up_lean_df <- extract_ora_df(ora_upregulated$Lean)
+ora_up_obese_df <- extract_ora_df(ora_upregulated$Obese)
+ora_up_t2d_df <- extract_ora_df(ora_upregulated$T2D)
+
+ora_down_lean_df <- extract_ora_df(ora_downregulated$Lean)
+ora_down_obese_df <- extract_ora_df(ora_downregulated$Obese)
+ora_down_t2d_df <- extract_ora_df(ora_downregulated$T2D)
+
+# Function to plot ORA results using ggplot
+plot_ORA_ggplot <- function(ora_df, title) {
+  if (is.null(ora_df)) {
+    print(paste(title, "- No enriched GO terms"))
+    return(NULL)
+  }
+
+  ggplot(ora_df, aes(x = GeneRatio, y = reorder(Description, GeneRatio), size = Count, color = p.adjust)) +
+    geom_point() +
+    scale_color_gradient(low = "paleturquoise3", high = "mediumpurple3", name = "p.adjust") +
+    scale_size_continuous(name = "Count") +
+    theme_bw() +
+    theme(
+      legend.position = "top",
+      strip.background = element_blank(),
+      strip.text = element_text(face = "bold", size = 8),  
+      axis.title.x = element_text(size = 8),  
+      axis.title.y = element_text(size = 6),  
+      axis.text.x = element_text(size = 6),  
+      axis.text.y = element_text(size = 6),  
+      legend.text = element_text(size = 6), 
+      legend.title = element_text(size = 6)  
+    ) +
+    labs(title = title)
+}
+
+# Plot results
+plot_ORA_ggplot(ora_up_lean_df, "ORA - Uniquely Upregulated in Lean")
+# NONE
+plot_ORA_ggplot(ora_up_obese_df, "ORA - Uniquely Upregulated in Obese")
+plot_ORA_ggplot(ora_up_t2d_df, "ORA - Uniquely Upregulated in T2D")
+
+plot_ORA_ggplot(ora_down_lean_df, "ORA - Uniquely Downregulated in Lean")
+plot_ORA_ggplot(ora_down_obese_df, "ORA - Uniquely Downregulated in Obese")
+plot_ORA_ggplot(ora_down_t2d_df, "ORA - Uniquely Downregulated in T2D")
+
+
+```
+
+
+
+
+```{r T2D group comparison vs training}
+
+######################## FIGURE S3C ################################
+
+# Merge data by Protein
+plot_data <- merge(
+  T2D_trainingBasal[, c("Protein", "logFC", "adj.P.Val")], 
+  T2D_Lean_prebasal[, c("Protein", "logFC", "adj.P.Val")], 
+  by = "Protein", 
+  suffixes = c("_T2DTraining", "_T2DLean")
+)
+
+# Define color based on significance
+plot_data$color <- ifelse(
+  plot_data$adj.P.Val_T2DTraining < 0.05 & plot_data$adj.P.Val_T2DLean < 0.1, "blue4",  # Both conditions met
+  ifelse(
+    plot_data$adj.P.Val_T2DTraining < 0.05, "magenta3",  # Only T2DTraining is significant
+    ifelse(plot_data$adj.P.Val_T2DLean < 0.1, "deepskyblue3", "grey")  # Only T2DLean is significant
+  )
+)
+
+# Generate the plot
+p <- ggplot(plot_data, aes(x = logFC_T2DTraining, y = logFC_T2DLean, color = color)) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  scale_color_identity() +  # Uses the assigned colors directly
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  labs(
+    title = "T2D Training and T2D-Lean (Pre-Basal)",
+    x = "logFC(Post - Pre, T2D)",
+    y = "logFC(T2D - Lean, baseline)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold"),
+    legend.position = "none"
+  )
+p
+
+# pearson correlation coefficient
+correlation_result <- cor.test(plot_data$logFC_T2DTraining, plot_data$logFC_T2DLean, 
+                               use = "complete.obs", method = "pearson")
+
+print(correlation_result)
+
+
+
+```
+
+```{r compare training logFC}
+
+############################## FIGURE S3D #######################################
+
+################# T2D and lean ########################
+
+plot_data <- merge(
+  T2D_trainingBasal[, c("Protein", "logFC", "adj.P.Val")], 
+  Lean_trainingBasal[, c("Protein", "logFC", "adj.P.Val")], 
+  by = "Protein", 
+  suffixes = c("_T2DTraining", "_LeanTraining")
+)
+
+plot_data$color <- ifelse(
+  plot_data$adj.P.Val_T2DTraining < 0.05 & plot_data$adj.P.Val_LeanTraining < 0.05, "blue4",  # Both conditions met
+  ifelse(
+    plot_data$adj.P.Val_T2DTraining < 0.05, "magenta3",  # Only T2DTraining is significant
+    ifelse(plot_data$adj.P.Val_LeanTraining < 0.05, "deepskyblue3", "grey")  # Only LeanTraining is significant
+  )
+)
+
+p <- ggplot(plot_data, aes(x = logFC_T2DTraining, y = logFC_LeanTraining, color = color)) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  scale_color_identity() +  # Uses the assigned colors directly
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  labs(
+    title = "Comparison of LogFC between T2D Training and Lean Training Effects",
+    x = "logFC(T2D Training Effect)",
+    y = "logFC(Lean Training Effect)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold"),
+    legend.position = "none"
+  )
+
+# Pearson correlation coefficient
+correlation_result <- cor.test(plot_data$logFC_T2DTraining, plot_data$logFC_LeanTraining, 
+                               use = "complete.obs", method = "pearson")
+print(correlation_result)
+
+
+
+
+
+################# T2D and obese ########################
+
+
+plot_data <- merge(
+  T2D_trainingBasal[, c("Protein", "logFC", "adj.P.Val")], 
+  Obese_trainingBasal[, c("Protein", "logFC", "adj.P.Val")], 
+  by = "Protein", 
+  suffixes = c("_T2DTraining", "_ObeseTraining")
+)
+plot_data$adj.P.Val_T2DTraining < 0.05 & plot_data$adj.P.Val_ObeseTraining < 0.05, "blue4",  # Both conditions met
+  ifelse(
+    plot_data$adj.P.Val_T2DTraining < 0.05, "magenta3",  # Only T2DTraining is significant
+    ifelse(plot_data$adj.P.Val_ObeseTraining < 0.05, "purple3", "grey")  # Only LeanTraining is significant
+  )
+)
+
+p <- ggplot(plot_data, aes(x = logFC_T2DTraining, y = logFC_ObeseTraining, color = color)) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  scale_color_identity() +  # Uses the assigned colors directly
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  labs(
+    title = "Comparison of LogFC between T2D Training and Obese Training Effects",
+    x = "logFC(T2D Training Effect)",
+    y = "logFC(Obese Training Effect)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold"),
+    legend.position = "none"
+  )
+
+# Pearson correlation coefficient
+correlation_result <- cor.test(plot_data$logFC_T2DTraining, plot_data$logFC_ObeseTraining, 
+                               use = "complete.obs", method = "pearson")
+print(correlation_result)
+
+
+
+
+
+
+################# obese and lean ########################
+
+plot_data <- merge(
+  Obese_trainingBasal[, c("Protein", "logFC", "adj.P.Val")], 
+  Lean_trainingBasal[, c("Protein", "logFC", "adj.P.Val")], 
+  by = "Protein", 
+  suffixes = c("_ObeseTraining", "_LeanTraining")
+)
+
+plot_data$color <- ifelse(
+  plot_data$adj.P.Val_ObeseTraining < 0.05 & plot_data$adj.P.Val_LeanTraining < 0.05, "blue4",  # Both conditions met
+  ifelse(
+    plot_data$adj.P.Val_ObeseTraining < 0.05, "purple3",  
+    ifelse(plot_data$adj.P.Val_LeanTraining < 0.05, "deepskyblue3", "grey")  # Only LeanTraining is significant
+  )
+)
+
+p <- ggplot(plot_data, aes(x = logFC_ObeseTraining, y = logFC_LeanTraining, color = color)) +
+  geom_point(size = 0.5, alpha = 0.7) +
+  scale_color_identity() +  # Uses the assigned colors directly
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", alpha = 0.5) +
+  labs(
+    title = "Comparison of LogFC between Obese Training and Lean Training Effects",
+    x = "logFC(Obese Training Effect)",
+    y = "logFC(Lean Training Effect)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold"),
+    legend.position = "none"
+  )
+
+# Pearson correlation coefficient
+correlation_result <- cor.test(plot_data$logFC_ObeseTraining, plot_data$logFC_LeanTraining, 
+                               use = "complete.obs", method = "pearson")
+print(correlation_result)
+
+
+
+```
+
+
+
+
+```{r Volcanos specific contrasts}
+
+
+######################### FIGURE 3A ###############################
+
+volcano_trainingGroup <- function(.data, x_limits = c(-2.5, 3), y_limits = c(0, 8)) {
+    if("Protein" %in% colnames(.data)) {
+        data_volcano <- .data
+    } else {
+        data_volcano <- .data %>%
+            rownames_to_column("Protein")
+    }
+
+    data_volcano <- data_volcano %>%
+        dplyr::mutate(
+            significant = dplyr::case_when(
+                adj.P.Val < 0.05 & logFC > 0 ~ "significantly upregulated",
+                adj.P.Val < 0.05 & logFC < 0 ~ "significantly downregulated",
+               # adj.P.Val >= 0.05 & adj.P.Val < 0.1 & logFC > 0 ~ "marginally up",
+                #adj.P.Val >= 0.05 & adj.P.Val < 0.1 & logFC < 0 ~ "marginally down",
+                TRUE ~ "not significant"
+            )
+        )
+
+    p <- ggplot(data_volcano, aes(
+        x = logFC,
+        y = -log10(P.Value),
+        color = significant,
+        label = Protein
+    )) +
+        geom_point(size = 0.4, alpha = 0.7) +
+        scale_color_manual(values = c(
+            "not significant" = "grey",
+           # "marginally up" = "indianred3",
+            #"marginally down" = "skyblue3",
+            "significantly downregulated" = "dodgerblue4",
+            "significantly upregulated" = "firebrick4"
+        ), name = "Significance") +
+        theme_classic() +
+        theme(
+            text = element_text(size = 6, colour = "black"),
+            legend.position = "none"
+        ) +
+        coord_cartesian(xlim = x_limits, ylim = y_limits)
+
+    labels_to_show <- c(
+        "CMBL", "CD93", "OTUD6B", "PDLIM3", "PRKAG2", "SYNPO2L", "PXDN", "FLNB", "H1-5", "PRKAR2A"
+        #  "PSMA4", "MYLK2", "PRKAG2", "PRKAA1", "PKRAG3", "CASTOR2", "CD93", "MRPS15",  "SYNPOL", "PRKAR2A", "ECPAS"
+    )
+
+    p <- p + ggrepel::geom_text_repel(
+        data = dplyr::filter(data_volcano, Protein %in% labels_to_show),
+        aes(
+            x = logFC,
+            y = -log10(P.Value),
+            label = Protein,
+            color = significant
+        ),
+        size = 2,
+        min.segment.length = unit(0.1, "lines"),
+        segment.size = unit(0.2, "mm"),
+        segment.color = "grey30",
+        force = 80,
+        max.overlaps = Inf
+    )
+
+    return(p)
+}
+
+
+
+v_lean <- volcano_trainingGroup(Lean_trainingBasal)
+v_obese <- volcano_trainingGroup(Obese_trainingBasal)
+v_t2d <- volcano_trainingGroup(T2D_trainingBasal)
+
+v <- v_lean + v_obese + v_t2d
+v
+
+
+
+```
+
+
+
+```{r absolute logFC vs SD(abs.logFC) for specific training effects}
+
+
+################### FIGURE 3C and FIGURE S3B ##################################
+
+# Step 1: Keep only Basal samples
+Rename_basal <- Rename %>% filter(Condition == "Basal")
+columns_keep <- intersect(colnames(samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df), Rename_basal$Sample_ID)
+basal <- samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df[, columns_keep]
+
+# Step 2: Define significant proteins
+lean_training <- Lean_trainingBasal %>% filter(adj.P.Val < 0.05) %>% pull(Protein)
+obese_training <- Obese_trainingBasal %>% filter(adj.P.Val < 0.05) %>% pull(Protein)
+t2d_training <- T2D_trainingBasal %>% filter(adj.P.Val < 0.05) %>% pull(Protein)
+any_sig_training <- unique(c(lean_training, obese_training, t2d_training))
+
+# Step 3: Calculate logFC (Post - Pre) per participant
+logFC_df <- data.frame(row.names = rownames(basal))
+
+for (Participant in unique(Rename_basal$Participant)) {
+    pre_sample <- Rename_basal$Sample_ID[Rename_basal$Participant == Participant & Rename_basal$Timepoint == "Pre"]
+    post_sample <- Rename_basal$Sample_ID[Rename_basal$Participant == Participant & Rename_basal$Timepoint == "Post"]
+    
+    if (length(pre_sample) == 1 && length(post_sample) == 1 &&
+        pre_sample %in% colnames(basal) && post_sample %in% colnames(basal)) {
+        
+        logFC_values <- basal[, colnames(basal) %in% post_sample] - basal[, colnames(basal) %in% pre_sample]
+        logFC_df[[as.character(Participant)]] <- logFC_values
+    } else {
+        message("Skipping participant ", Participant, " due to missing Pre/Post samples.")
+    }
+}
+
+# Step 4: Transpose and add group info
+logFC_df <- t(logFC_df)
+logFC_df <- as.data.frame(logFC_df)
+logFC_df$Group <- Rename_basal$Group[match(rownames(logFC_df), Rename_basal$Participant)]
+
+# Step 5: Convert to absolute logFC
+logFC_abs_df <- logFC_df
+logFC_abs_df[, -ncol(logFC_abs_df)] <- abs(logFC_abs_df[, -ncol(logFC_abs_df)])
+
+# Step 6: Calculate mean and SD of absolute logFC per group
+mean_sd_results <- data.frame(Protein = colnames(logFC_abs_df)[-ncol(logFC_abs_df)])
+for (group in unique(logFC_abs_df$Group)) {
+    group_data <- logFC_abs_df[logFC_abs_df$Group == group, -ncol(logFC_abs_df)]
+    mean_values <- apply(group_data, 2, mean, na.rm = TRUE)
+    sd_values <- apply(group_data, 2, sd, na.rm = TRUE)
+    mean_sd_results[[paste0(group, "_Mean")]] <- mean_values
+    mean_sd_results[[paste0(group, "_SD")]] <- sd_values
+}
+
+# Step 7: Filter to significant proteins only
+mean_sd_results <- mean_sd_results %>% filter(Protein %in% any_sig_training)
+
+# Step 8: Reshape to long format for plotting
+mean_sd_long <- mean_sd_results %>%
+    pivot_longer(cols = -Protein, names_to = "Measure", values_to = "Value") %>%
+    separate(Measure, into = c("Group", "Metric"), sep = "_") %>%
+    pivot_wider(names_from = Metric, values_from = Value)
+
+# Step 9: Add color coding by significance
+mean_sd_long <- mean_sd_long %>%
+    mutate(
+        Color = case_when(
+            Group == "Lean" & Protein %in% lean_training ~ "deepskyblue3",
+            Group == "Obese" & Protein %in% obese_training ~ "mediumpurple4",
+            Group == "T2D" & Protein %in% t2d_training ~ "magenta3",
+            TRUE ~ "grey"
+        )
+    )
+
+# Step 10: Plot SD vs. Mean(abs(logFC))
+logFC_abs_plot <- ggplot(mean_sd_long, aes(x = SD, y = Mean)) +
+    geom_point(aes(color = Color), size = 0.3, alpha = 0.8) +
+    scale_color_identity() +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 0.3) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.3) +
+    facet_wrap(~ Group, scales = "fixed") +
+    theme_bw() +
+    labs(
+        title = "SD vs. Mean(abs(logFC Post-Pre)) for sig. training-reg proteins",
+        x = "Standard Deviation of abs(logFC)",
+        y = "Mean abs(logFC)"
+    ) +
+    theme(
+        strip.text = element_text(size = 6),
+        plot.title = element_text(size = 6),
+        axis.title = element_text(size = 6),
+        axis.text = element_text(size = 6),
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 6)
+    )
+print(logFC_abs_plot)
+
+# Step 11: Compute groupwise summaries
+logFC_mean_long <- logFC_abs_df %>%
+    pivot_longer(cols = -Group, names_to = "Protein", values_to = "abs_logFC") %>%
+    group_by(Group, Protein) %>%
+    summarise(abs_logFC = mean(abs_logFC, na.rm = TRUE), .groups = "drop") %>%
+    filter(Protein %in% any_sig_training)
+
+logFC_sd_long <- logFC_abs_df %>%
+    pivot_longer(cols = -Group, names_to = "Protein", values_to = "abs_logFC") %>%
+    group_by(Group, Protein) %>%
+    summarise(SD = sd(abs_logFC, na.rm = TRUE), .groups = "drop") %>%
+    filter(Protein %in% any_sig_training)
+
+# Step 12: Summary stats
+logFC_mean_summary <- logFC_mean_long %>%
+    group_by(Group) %>%
+    summarise(
+        Mean_abs_logFC = mean(abs_logFC, na.rm = TRUE),
+        Median_abs_logFC = median(abs_logFC, na.rm = TRUE)
+    )
+
+logFC_sd_summary <- logFC_sd_long %>%
+    group_by(Group) %>%
+    summarise(
+        Mean_SD_abs_logFC = mean(SD, na.rm = TRUE),
+        Median_SD_abs_logFC = median(SD, na.rm = TRUE)
+    )
+
+print(logFC_mean_summary)
+print(logFC_sd_summary)
+
+# Step 13: Wilcoxon tests
+logFC_mean_wide <- mean_sd_long %>%
+    dplyr::select(Group, Protein, Mean) %>%
+    pivot_wider(names_from = Group, values_from = Mean)
+
+logFC_sd_wide <- mean_sd_long %>%
+    dplyr::select(Group, Protein, SD) %>%
+    pivot_wider(names_from = Group, values_from = SD)
+
+wilcox.test(logFC_mean_wide$T2D, logFC_mean_wide$Lean, paired = TRUE)
+wilcox.test(logFC_mean_wide$T2D, logFC_mean_wide$Obese, paired = TRUE)
+wilcox.test(logFC_mean_wide$Obese, logFC_mean_wide$Lean, paired = TRUE)
+
+wilcox.test(logFC_sd_wide$T2D, logFC_sd_wide$Lean, paired = TRUE)
+wilcox.test(logFC_sd_wide$T2D, logFC_sd_wide$Obese, paired = TRUE)
+wilcox.test(logFC_sd_wide$Obese, logFC_sd_wide$Lean, paired = TRUE)
+
+
+
+
+
+
+
+
+# Final Plot Using Real logFC
+
+# Recalculate mean(logFC) per group using the original logFC_df
+logFC_real_long <- logFC_df %>%
+    pivot_longer(cols = -Group, names_to = "Protein", values_to = "logFC") %>%
+    group_by(Group, Protein) %>%
+    summarise(Mean_logFC = mean(logFC, na.rm = TRUE), .groups = "drop") %>%
+    filter(Protein %in% any_sig_training)
+
+# Use previously calculated SD of abs(logFC) from mean_sd_long
+logFC_sd_abs_long <- mean_sd_long %>%
+    dplyr::select(Group, Protein, SD) %>%
+    filter(Protein %in% any_sig_training)
+
+# Merge real mean(logFC) and SD(abs(logFC))
+real_logFC_plot_data <- left_join(logFC_real_long, logFC_sd_abs_long, by = c("Group", "Protein"))
+
+# Add color coding
+real_logFC_plot_data <- real_logFC_plot_data %>%
+    mutate(
+        Color = case_when(
+            Group == "Lean" & Protein %in% lean_training ~ "deepskyblue3",
+            Group == "Obese" & Protein %in% obese_training ~ "mediumpurple4",
+            Group == "T2D" & Protein %in% t2d_training ~ "magenta3",
+            TRUE ~ "grey"
+        )
+    )
+
+# Plot
+real_logFC_plot <- ggplot(real_logFC_plot_data, aes(x = SD, y = Mean_logFC)) +
+    geom_point(aes(color = Color), size = 0.3, alpha = 0.8) +
+    scale_color_identity() +
+    geom_text_repel(
+        aes(label = Protein),
+        size = 2,
+        box.padding = 0.1,
+        point.padding = 0.1,
+        segment.size = 0.2,
+        segment.color = "grey40",
+        min.segment.length = 0
+    ) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 0.3) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.3) +
+    facet_wrap(~ Group, scales = "fixed") +
+    theme_bw() +
+    labs(
+        title = "SD(abs(logFC)) vs. Mean(logFC Post-Pre)",
+        x = "Standard Deviation of abs(logFC)",
+        y = "Mean logFC (Post - Pre)"
+    ) +
+    theme(
+        strip.text = element_text(size = 6),
+        plot.title = element_text(size = 6),
+        axis.title = element_text(size = 6),
+        axis.text = element_text(size = 6),
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 6)
+    )
+
+print(real_logFC_plot)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Calculate SEM for abs(logFC)
+logFC_mean_sem <- logFC_mean_long %>%
+    group_by(Group) %>%
+    summarise(
+        Mean_abs_logFC = mean(abs_logFC, na.rm = TRUE),
+        SEM = sd(abs_logFC, na.rm = TRUE) / sqrt(n()),
+        .groups = "drop"
+    )
+
+# Calculate SEM for SD(abs(logFC))
+logFC_sd_sem <- logFC_sd_long %>%
+    group_by(Group) %>%
+    summarise(
+        Mean_SD = mean(SD, na.rm = TRUE),
+        SEM = sd(SD, na.rm = TRUE) / sqrt(n()),
+        .groups = "drop"
+    )
+
+
+logfc<-ggplot(logFC_mean_long, aes(x = Group, y = abs_logFC, fill = Group)) +
+    geom_boxplot(outlier.shape = NA, width = 0.6, alpha = 0.6, size = 0.2) +
+    coord_cartesian(ylim = c(0, quantile(logFC_mean_long$abs_logFC, 0.95))) +  # Adjust as needed
+    theme_bw() +
+    labs(
+        title = "Mean of abs(logFC) per Group",
+        y = "abs(logFC)",
+        x = ""
+    ) +
+    scale_fill_manual(values = c("Lean" = "deepskyblue3", "Obese" = "mediumpurple4", "T2D" = "magenta3")) +
+    theme(
+        text = element_text(size = 6),
+        axis.text = element_text(size = 6),
+        axis.title = element_text(size = 6),
+        plot.title = element_text(size = 6),
+        legend.position = "none"
+    )
+
+
+upper_limit_sd <- quantile(logFC_sd_long$SD, 0.95, na.rm = TRUE)
+
+sd<-ggplot(logFC_sd_long, aes(x = Group, y = SD, fill = Group)) +
+    geom_boxplot(outlier.shape = NA, width = 0.6, alpha = 0.6, size = 0.2) +
+    coord_cartesian(ylim = c(0, upper_limit_sd)) +
+    theme_bw() +
+    labs(
+        title = "SD of abs(logFC) per Group",
+        y = "SD of abs(logFC)",
+        x = ""
+    ) +
+    scale_fill_manual(values = c("Lean" = "deepskyblue3", "Obese" = "mediumpurple4", "T2D" = "magenta3")) +
+    theme(
+        text = element_text(size = 6),
+        axis.text = element_text(size = 6),
+        axis.title = element_text(size = 6),
+        plot.title = element_text(size = 6),
+        legend.position = "none"
+    )
+
+
+
+
+```
+
+
+```{r boxplots}
+
+
+prebasal_plot <- function(protein_name) {
+    protein_row <- samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df[protein_name, , drop = FALSE]
+    protein_row_t <- t(protein_row)
+    protein_row_t <- as.data.frame(protein_row_t)
+
+    # Add metadata
+    protein_row_t$GroupTimepoint <- Rename$GroupTimepoint
+    protein_row_t$Sample <- Rename$Sample_ID
+    protein_row_t$Group <- Rename$Group
+    protein_row_t$Timepoint <- Rename$Timepoint
+    protein_row_t$Condition <- Rename$Condition
+    protein_row_t$Participant <- Rename$Participant
+
+    # Filter to include only "Pre" samples
+    protein_row_t <- protein_row_t %>%
+        filter(grepl("Pre", GroupTimepoint) & Condition == "Basal")
+
+    # Ensure correct factor levels for GroupTimepoint
+    protein_row_t$GroupTimepoint <- factor(protein_row_t$GroupTimepoint, levels = c("LeanPre", "ObesePre", "T2DPre"))
+
+    # Define custom colors
+    color_fill <- c("Pre" = "white")
+    color_groups <- c("Lean" = "deepskyblue4", "Obese" = "purple4", "T2D" = "maroon3")
+
+    point_size <- 0.1
+    line_size <- 0.3
+    fatten_median <- 0.8
+
+    plot <- ggplot(protein_row_t, aes(x = GroupTimepoint, y = !!sym(protein_name), color = Group, fill = Timepoint)) +
+        geom_boxplot(outlier.size = point_size, size = line_size, fatten = fatten_median) + # Adjust box and median line size
+        geom_point(size = point_size, alpha = 0.5, position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.5)) +
+        labs(title = paste(protein_name), x = "", y = "log2 expression") +
+        scale_fill_manual(values = color_fill) +
+        scale_color_manual(values = color_groups) +
+        theme_classic() +
+        theme(
+            legend.position = "none",
+            axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            text = element_text(size = 6),
+            axis.title = element_text(size = 6),
+            axis.text = element_text(size = 6),
+            plot.title = element_text(size = 6, face = "bold")
+        )
+    return(plot)
+}
+
+
+boxplot_pre_post <- function(protein_name) {
+    protein_row <- proteome_dataset[protein_name, , drop = FALSE]
+    protein_row_t <- t(protein_row)
+    protein_row_t <- as.data.frame(protein_row_t)
+    protein_row_t$GroupTimepoint <- Rename$GroupTimepoint
+    protein_row_t$GroupTimepoint <- factor(protein_row_t$GroupTimepoint, levels = c("LeanPre", "LeanPost", "ObesePre", "ObesePost", "T2DPre", "T2DPost"))
+    protein_row_t$Sample <- Rename$Sample_ID
+    protein_row_t$Group <- Rename$Group
+    protein_row_t$Timepoint <- Rename$Timepoint
+    protein_row_t$Participant <- Rename$Participant
+    protein_row_t$Condition <- Rename$Condition
+    # Filter to include only "Pre" samples
+    protein_row_t <- protein_row_t %>% filter(grepl("Basal", Condition))
+
+    # Define custom colors
+    color_fill <- c("Pre" = "white", "Post" = "mistyrose")
+    color_groups <- c("Lean" = "deepskyblue4", "Obese" = "purple4", "T2D" = "maroon3")
+
+    point_size <- 0.01
+    line_size <- 0.2
+    fatten_median <- 0.8
+
+    plot <- ggplot(protein_row_t, aes(x = GroupTimepoint, y = !!sym(protein_name), color = Group, fill = Timepoint)) +
+        geom_boxplot(outlier.size = 0.01, size = line_size, fatten = fatten_median) +
+        geom_point(size = 0.01, alpha = 0.2, position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.8)) +
+        geom_line(aes(group = Participant, colour = Group), size = 0.1, alpha=0.5) +
+        labs(title = paste(protein_name), x = "", y = "") +
+        scale_fill_manual(values = color_fill) +
+        scale_color_manual(values = color_groups) +
+        theme_classic() +
+        theme(
+            legend.position = "none",
+            axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            text = element_text(size = 6),
+            axis.title = element_text(size = 6),
+            axis.text = element_text(size = 6),
+            plot.title = element_text(size = 6, face = "bold")
+        )
+    return(plot)
+}
+
+p <- c("")
+
+combined_plot <- map(p, boxplot_pre_post) %>%
+    wrap_plots(ncol = 1)
+
+print(combined_plot)
+
+
+
+
+
+
+boxplots_all <- function(Sites, data, Info) {
+    plots_list <- list() 
+    
+    for (site_name in Sites) {
+
+        site_row <- data[site_name, , drop = FALSE]
+        site_row_t <- t(site_row)  
+        site_row_t <- as.data.frame(site_row_t)
+
+        site_row_t$Combined <- Rename$Combined
+        site_row_t$Rename <- factor(site_row_t$Combined, levels = c(
+            "LeanPreBasal", "LeanPreInsulin", "LeanPostBasal", "LeanPostInsulin",
+            "ObesePreBasal", "ObesePreInsulin", "ObesePostBasal", "ObesePostInsulin",
+            "T2DPreBasal", "T2DPreInsulin", "T2DPostBasal", "T2DPostInsulin"
+        ))
+        site_row_t$Group <- Rename$Group
+        site_row_t$Timepoint <- Rename$Timepoint
+        site_row_t$Participant <- Rename$Participant
+        site_row_t$Condition <- Rename$Condition
+
+
+        color_fill <- c("Pre" = "white", "Post" = "mistyrose1")
+        color_groups <- c("Lean" = "deepskyblue4", "Obese" = "purple4", "T2D" = "maroon3")
+
+        point_size <- 0.05
+        line_size <- 0.2
+        fatten_median <- 0.8
+
+        plot <- ggplot(site_row_t, aes(x = Rename, y = !!sym(site_name), color = Group, fill = Timepoint)) +
+            geom_boxplot(outlier.size = point_size, size = line_size, fatten = fatten_median) +
+            geom_point(size = point_size, alpha = 0.6, position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.8)) +
+            geom_line(aes(group = Participant, colour = Group), size = 0.1, alpha = 0.5) +
+            labs(title = paste("", site_name)) +
+            scale_fill_manual(values = color_fill) +
+            scale_color_manual(values = color_groups) +
+            theme_classic() +
+            theme(
+                legend.position = "none",
+                text = element_text(size = 6),
+                axis.title.x = element_blank(),
+                axis.text.x = element_blank(),
+                axis.title.y = element_blank(),
+                axis.text.y = element_text(size = 6),
+                plot.title = element_text(size = 6, face = "bold")
+            )
+        
+        plots_list[[site_name]] <- plot
+    }
+
+    combined_plots <- do.call(grid.arrange, c(plots_list, ncol = 1))
+
+    return(combined_plots)
+}
+
+sites <- c("")
+
+plots <- boxplots_all(Sites = sites, data = proteome_dataset, Info = Rename)
+
+
+
+
+```
+
+
+
+######################### GSEA ###################################
+
+
+```{r Prepare_GSEA}
+
+prepare_gsea_list <- function(topTable_data) {
+  topTable_data %>%
+    filter(!is.na(logFC)) %>%
+    arrange(desc(logFC)) %>%
+    { setNames(as.numeric(.$logFC), .$Protein) } %>%
+    na.omit()
+}
+
+gsea_list_training <- prepare_gsea_list(table_MainEffect_Training)
+gsea_list_T2D_Lean_prebasal <- prepare_gsea_list(T2D_Lean_prebasal)
+gsea_list_Obese_Lean_prebasal <- prepare_gsea_list(Obese_Lean_prebasal)
+gsea_list_T2D_Obese_prebasal <- prepare_gsea_list(T2D_Obese_prebasal)
+gsea_list_Lean_trainingBasal <- prepare_gsea_list(Lean_trainingBasal)
+gsea_list_Obese_trainingBasal <- prepare_gsea_list(Obese_trainingBasal)
+gsea_list_T2D_trainingBasal <- prepare_gsea_list(T2D_trainingBasal)
+
+```
+
+```{r GSEA}
+
+gsea <- function(gene_list, OrgDb, ont = "ALL", pvalue_cutoff = 0.05, key_type = "SYMBOL", n_perm_simple = 100000, eps = 0, simplify_cutoff = 0.7) {
+  gsea_results <- clusterProfiler::gseGO(
+    geneList = gene_list,
+    OrgDb = org.Hs.eg.db,
+    ont = ont,
+    pvalueCutoff = pvalue_cutoff,
+    keyType = key_type,
+    nPermSimple = n_perm_simple,
+    eps = eps
+  )
+  gsea_filtered <- clusterProfiler::simplify(
+    gsea_results, 
+    cutoff = 0.7, 
+    by = "p.adjust", 
+    select_fun = min
+  )
+    return(gsea_filtered)
+}
+
+gsea_training_filtered <- gsea(gsea_list_training)
+gsea_T2D_Lean_prebasal_filtered <- gsea(gsea_list_T2D_Lean_prebasal)
+gsea_Obese_Lean_prebasal_filtered <- gsea(gsea_list_Obese_Lean_prebasal)
+gsea_T2D_Obese_prebasal_filtered <- gsea(gsea_list_T2D_Obese_prebasal)
+gsea_Lean_trainingBasal_filtered <- gsea(gsea_list_Lean_trainingBasal)
+gsea_Obese_trainingBasal_filtered <- gsea(gsea_list_Obese_trainingBasal)
+gsea_T2D_trainingBasal_filtered <- gsea(gsea_list_T2D_trainingBasal)
+
+
+#################### FIGURE 2C ##############################
+
+## Group differences Pre Basal
+combinedgsea_groups_prebasal <- list(`Obese-Lean`=gsea_Obese_Lean_prebasal_filtered, `T2D-Lean`=gsea_T2D_Lean_prebasal_filtered, `T2D-Obese`=gsea_T2D_Obese_prebasal_filtered)
+combinedgsea_groups_prebasal <- merge_result(combinedgsea_groups_prebasal)
+use
+
+
+a <- clusterProfiler::dotplot(combinedgsea_groups_prebasal, showCategory = 4, split = ".sign") +
+    facet_grid(. ~ .sign) +
+    labs(x = expression(GeneRatio)) +
+    theme(axis.text.x = element_text(size = 6),
+          strip.text = element_text(size = 6),
+          axis.text.y = element_text(size = 6),
+          text = element_text(size = 6),
+          axis.title.x = element_text(size = 6),
+          plot.title = element_text(hjust = 0.5),
+          plot.margin = unit(c(1, 1, 1, 4), "lines"),
+          legend.key.size = unit(2, "mm"),  # Adjusts legend size
+          legend.text = element_text(size = 6)) +  # Adjusts legend text size
+    ggtitle("Group differences pre basal") +
+    scale_fill_gradient(low = "paleturquoise3", high = "mediumpurple3") +
+    coord_fixed(ratio = 1.2) +
+    guides(color = guide_legend(key.height = unit(2, "mm"), key.width = unit(2, "mm"))) +  # Adjust legend key dimensions
+    scale_size(range = c(1, 3))
+a
+
+
+######################### FIGURE 3D ###############################
+
+## Training effects
+combinedgsea_training_basal <- list(`Lean`=gsea_Lean_trainingBasal_filtered,`Obese`=gsea_Obese_trainingBasal_filtered, `T2D`=gsea_T2D_trainingBasal_filtered)
+combinedgsea_training_basal <- merge_result(combinedgsea_training_basal)
+
+b <- clusterProfiler::dotplot(combinedgsea_training_basal, showCategory = 4, split = ".sign") +
+    facet_grid(. ~ .sign) +
+    labs(x = expression(GeneRatio)) +
+    theme(axis.text.x = element_text(size = 6),
+          strip.text = element_text(size = 6),
+          axis.text.y = element_text(size = 6),
+          text = element_text(size = 6),
+          axis.title.x = element_text(size = 6),
+          plot.title = element_text(hjust = 0.5),
+          plot.margin = unit(c(1, 1, 1, 4), "lines"),
+          legend.key.size = unit(2, "mm"),  # Adjusts legend size
+          legend.text = element_text(size = 6)) +  # Adjusts legend text size
+    ggtitle("Group specific training effects, basal") +
+    scale_fill_gradient(low = "paleturquoise3", high = "mediumpurple3") +
+    coord_fixed(ratio = 1.2) +
+    guides(color = guide_legend(key.height = unit(2, "mm"), key.width = unit(2, "mm"))) +  # Adjust legend key dimensions
+    scale_size(range = c(1, 3))
+b
+
+
+```
+
+
+
+####################### Cellular compartments #############################
+
+```{r prepare CC analysis}
+
+Rename_basal <- Rename %>%
+    filter(Rename$Condition == "Basal")
+raw_samples_basal <- raw_samples[, colnames(raw_samples) %in% Rename_basal$Sample_ID]
+
+
+
+# read in uniprot keywords
+uniprot_keywords <- readxl::read_xlsx(here::here("data-raw", "uniprot_human.xlsx")) %>%
+    dplyr::rename_with(snakecase::to_snake_case) %>%
+    dplyr::filter(gene_names != "") %>%
+    dplyr::mutate(entry_name = make.names(entry_name, unique = TRUE), entry_name)
+
+
+
+##Remove HUMAN from gene names and move gene names (entry_name)
+uniprot_keywords$entry_name <- gsub("_HUMAN", "", uniprot_keywords$entry_name)
+uniprot_keywords <- tibble::column_to_rownames(uniprot_keywords, var = "entry_name")
+```
+
+```{r all CC pre HIIT}
+
+####################### FIGURE 2D ###################################
+
+compartments <- c("Cytosol", "Endoplasmic reticulum", "Golgi apparatus", "Nucleus", "Mitochondria",
+                  "Endosome", "Lysosome", "Peroxisome", "Proteasome", "Ribosome")
+
+fill_colors_pre <- c("LeanPre" = "white",
+                     "ObesePre" = "white",
+                     "T2DPre" = "white")
+
+outline_colors_pre <- c("LeanPre" = "deepskyblue4",
+                        "ObesePre" = "purple4",
+                        "T2DPre" = "maroon3")
+
+# Store plots and stats
+plots_list <- list()
+anova_results_list <- list()
+tukey_results_list <- list()
+
+# Loop through compartments
+for (compartment in compartments) {
+
+  # Get proteins belonging to the compartment
+  compartment_proteins <- uniprot_keywords %>%
+    filter(str_detect(keywords, regex(compartment, ignore_case = TRUE)))
+
+  unique_gene_names <- unique(unlist(strsplit(as.character(compartment_proteins$gene_names), " ")))
+  matching_rows <- intersect(rownames(raw_samples_basal), unique_gene_names)
+
+  compartment_data <- raw_samples_basal %>%
+    filter(rownames(raw_samples_basal) %in% matching_rows)
+
+  # Normalize by total abundance
+  summed_abundance_per_sample <- colSums(compartment_data, na.rm = TRUE)
+  total_abundance_per_sample <- colSums(raw_samples_basal, na.rm = TRUE)
+  normalized_abundance <- (summed_abundance_per_sample / total_abundance_per_sample) * 100
+
+  # Build dataframe with metadata
+  normalized_data <- data.frame(
+    Sample = names(normalized_abundance),
+    NormalizedAbundance = normalized_abundance
+  )
+
+  normalized_data$GroupTimepoint <- Rename_basal$GroupTimepoint[match(normalized_data$Sample, Rename_basal$Sample_ID)]
+
+  # Filter to Pre only
+  normalized_data <- normalized_data %>%
+    filter(GroupTimepoint %in% c("LeanPre", "ObesePre", "T2DPre"))
+
+  normalized_data$GroupTimepoint <- factor(normalized_data$GroupTimepoint,
+                                           levels = c("LeanPre", "ObesePre", "T2DPre"))
+
+  # --- Boxplot ---
+  plot <- ggplot(normalized_data, aes(x = GroupTimepoint, y = NormalizedAbundance,
+                                      fill = GroupTimepoint, color = GroupTimepoint)) +
+    geom_boxplot(outlier.size = 0.5, size = 0.3, width = 0.5) +
+    geom_jitter(width = 0.15, alpha = 0.4, size = 0.6) +
+    scale_fill_manual(values = fill_colors_pre) +
+    scale_color_manual(values = outline_colors_pre) +
+    labs(title = paste("Normalized", compartment, "Protein Abundance - Pre"),
+         x = "Group (Pre)",
+         y = "% of Total Proteome") +
+    theme_classic() +
+    theme(
+      legend.position = "none",
+      text = element_text(size = 6),
+      axis.title = element_text(size = 6),
+      axis.text = element_text(size = 6),
+      plot.title = element_text(size = 6, face = "bold")
+    )
+
+  plots_list[[compartment]] <- plot
+
+  # --- Stats: ANOVA + Tukey ---
+  anova_result <- aov(NormalizedAbundance ~ GroupTimepoint, data = normalized_data)
+  anova_results_list[[compartment]] <- summary(anova_result)
+
+  tukey_result <- TukeyHSD(anova_result)
+  tukey_results_list[[compartment]] <- tukey_result
+
+  # Print significant Tukey results (optional)
+  print(paste("Tukey HSD results for", compartment))
+  print(tukey_result)
+}
+
+final_plot <- wrap_plots(plots_list, ncol = 3) + 
+  plot_annotation(title = "Normalized Protein Abundance Across Compartments - Pre Timepoints")
+
+
+
+
+
+
+
+################################# FIGURE S3E #######################################
+
+### all CC pre and post HIIT
+
+
+compartments <- c("Cytosol", "Endoplasmic reticulum", "Golgi apparatus", "Nucleus", "Mitochondria",
+                  "Endosome", "Lysosome", "Peroxisome", "Proteasome", "Ribosome")
+
+fill_colors <- c("LeanPre" = "white",
+                 "ObesePre" = "white",
+                 "T2DPre" = "white",
+                 "LeanPost" = "mistyrose",
+                 "ObesePost" = "mistyrose",
+                 "T2DPost" = "mistyrose")
+
+outline_colors <- c("LeanPre" = "deepskyblue4",
+                    "ObesePre" = "purple4",
+                    "T2DPre" = "maroon3",
+                    "LeanPost" = "deepskyblue4",
+                    "ObesePost" = "purple4",
+                    "T2DPost" = "maroon3")
+
+# Store all plots
+plots_list <- list()
+
+
+# Loop through each cellular compartment
+for (compartment in compartments) {
+    
+    # Filter proteins belonging to the compartment
+    compartment_proteins <- uniprot_keywords %>%
+        filter(str_detect(keywords, regex(compartment, ignore_case = TRUE)))
+
+    unique_gene_names <- unique(unlist(strsplit(as.character(compartment_proteins$gene_names), " ")))
+    matching_rows <- intersect(rownames(raw_samples_basal), unique_gene_names)
+    
+    compartment_data <- raw_samples_basal %>%
+        filter(rownames(raw_samples_basal) %in% matching_rows)
+
+    # Compute summed abundance per sample
+    summed_abundance_per_sample <- colSums(compartment_data, na.rm = TRUE)
+    total_abundance_per_sample <- colSums(raw_samples_basal, na.rm = TRUE)
+
+    # Normalize
+    normalized_abundance <- (summed_abundance_per_sample / total_abundance_per_sample) * 100
+
+    # Create DataFrame with metadata
+    normalized_data <- data.frame(
+        Sample = names(normalized_abundance),
+        NormalizedAbundance = normalized_abundance
+    )
+
+    # Add GroupTimepoint and Participant
+    normalized_data$GroupTimepoint <- Rename_basal$GroupTimepoint[match(normalized_data$Sample, Rename_basal$Sample_ID)]
+    normalized_data$Participant <- Rename_basal$Participant[match(normalized_data$Sample, Rename_basal$Sample_ID)]
+
+    # Set GroupTimepoint as factor
+    normalized_data$GroupTimepoint <- factor(normalized_data$GroupTimepoint,
+        levels = c("LeanPre", "LeanPost", "ObesePre", "ObesePost", "T2DPre", "T2DPost"))
+
+    # Create boxplot with paired lines
+    plot <- ggplot(normalized_data, aes(x = GroupTimepoint, y = NormalizedAbundance,
+                                        fill = GroupTimepoint, color = GroupTimepoint)) +
+        geom_line(aes(group = Participant), color = "gray60", alpha = 0.5, linewidth = 0.1) +
+        geom_boxplot(outlier.size = 0.5, size = 0.3, width = 0.5) +
+        geom_jitter(width = 0.15, alpha = 0.4, size = 0.6) +
+        scale_fill_manual(values = fill_colors) +
+        scale_color_manual(values = outline_colors) +
+        labs(title = paste("Normalized", compartment, "Protein Abundance"),
+             x = "Group and Timepoint",
+             y = "% of Total Proteome") +
+        theme_classic() +
+        theme(
+            legend.position = "none",
+            text = element_text(size = 6),
+            axis.title = element_text(size = 6),
+            axis.text = element_text(size = 6),
+            plot.title = element_text(size = 6, face = "bold")
+        )
+
+    plots_list[[compartment]] <- plot
+}
+
+
+final_plot <- wrap_plots(plots_list, ncol = 3) + 
+    plot_annotation(title = "Average Protein Abundance Across Cellular Compartments")
+
+
+# normality
+shapiro.test(normalized_data$NormalizedAbundance)
+# p=0.9  normal
+
+# ANOVA 
+anova_result <- aov(NormalizedAbundance ~ GroupTimepoint, data = normalized_data)
+summary(anova_result)
+
+tukey_result <- TukeyHSD(anova_result)
+print(tukey_result)
+
+
+# Create empty lists to store results
+anova_results_list <- list()
+tukey_results_list <- list()
+
+# Loop through each cellular compartment
+for (compartment in compartments) {
+    
+    # Filter proteins belonging to the compartment
+    compartment_proteins <- uniprot_keywords %>%
+        filter(str_detect(keywords, regex(compartment, ignore_case = TRUE)))
+
+    unique_gene_names <- unique(unlist(strsplit(as.character(compartment_proteins$gene_names), " ")))
+    matching_rows <- intersect(rownames(raw_samples_basal), unique_gene_names)
+
+    compartment_data <- raw_samples_basal %>%
+        filter(rownames(raw_samples_basal) %in% matching_rows)
+
+    # Compute summed abundance per sample
+    summed_abundance_per_sample <- colSums(compartment_data, na.rm = TRUE)
+    total_abundance_per_sample <- colSums(raw_samples_basal, na.rm = TRUE)
+
+    # Normalize
+    normalized_abundance <- summed_abundance_per_sample / total_abundance_per_sample
+
+    # Create DataFrame with metadata
+    normalized_data <- data.frame(
+        Sample = names(normalized_abundance),
+        NormalizedAbundance = normalized_abundance
+    )
+
+    # Add metadata columns
+    normalized_data$GroupTimepoint <- Rename_basal$GroupTimepoint[match(normalized_data$Sample, Rename_basal$Sample_ID)]
+    normalized_data$GroupTimepoint <- factor(normalized_data$GroupTimepoint, 
+                                             levels = c("LeanPre", "LeanPost", "ObesePre", "ObesePost", "T2DPre", "T2DPost"))
+
+    # ANOVA test
+    anova_result <- aov(NormalizedAbundance ~ GroupTimepoint, data = normalized_data)
+    anova_results_list[[compartment]] <- summary(anova_result)
+
+    # Tukey's post-hoc test
+    tukey_result <- TukeyHSD(anova_result)
+    tukey_results_list[[compartment]] <- tukey_result
+
+    # Print significant results
+    print(paste("Tukey HSD results for", compartment))
+    print(tukey_result)
+}
+
+
+
+```
+
+
+```{r Heatmap Proteasome proteins}
+
+############################## FIGURE S3F ############################
+
+# Read in uniprot keywords
+uniprot_keywords <- readxl::read_xlsx(here::here('data-raw/uniprot_human.xlsx')) %>%
+    rename_with(snakecase::to_snake_case) %>%
+    filter(gene_names != "") %>%
+    mutate(entry_name = gsub("_HUMAN", "", entry_name)) %>% # Remove "_HUMAN"
+    column_to_rownames(var = "entry_name")
+
+# Define keyword lists
+keywords_of_interest <- c("Proteasome")
+
+# Filter proteins based on any of the keywords
+selected_proteins <- uniprot_keywords %>%
+    filter(str_detect(keywords, paste(keywords_of_interest, collapse = "|")))
+
+# Extract unique gene names
+unique_gene_names <- unique(unlist(strsplit(as.character(selected_proteins$gene_names), " ")))
+
+# Find matching rows in the main dataset
+matching_rows <- intersect(rownames(samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df), unique_gene_names)
+
+# Extract data for selected proteins
+selected_proteins_data <- samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df %>%
+    filter(rownames(samples_log2_removedoutlier_renamed_filter50_median_BeatboxBatchcorrected_df) %in% matching_rows)
+
+# Output the final dataset
+selected_proteins_factor <- rownames(selected_proteins_data)
+
+# Print summary
+cat("Total selected proteins across all keywords:", length(selected_proteins_factor), "\n")
+
+
+
+
+
+# pre and post data
+Rename_basal <- Rename[Rename$Condition == "Basal" , ]
+basal_samples <- as.character(Rename_basal$Sample_ID)
+df_basal <- selected_proteins_data[, colnames(selected_proteins_data) %in% basal_samples]
+
+
+
+
+t <- t(df_basal)
+z <- scale(t)
+z_scored_df_basal <- t(z)
+
+# Ensure the correct order of samples
+Rename_basal$Combined <- factor(Rename_basal$Combined, 
+                                levels = c("LeanPreBasal", "ObesePreBasal", "T2DPreBasal",
+                                           "LeanPostBasal", "ObesePostBasal", "T2DPostBasal"))
+
+# Order columns of df based on the Combined column in Rename_basal
+order_indices <- order(Rename_basal$Combined[match(colnames(z_scored_df_basal), Rename_basal$Sample_ID)])
+z_scored_df_basal_ordered <- z_scored_df_basal[, order_indices]
+
+# Set rownames to Sample_ID for annotation
+rownames(Rename_basal) <- Rename_basal$Sample_ID
+
+# annotation
+annotation_group <- data.frame(
+  Combined = Rename_basal$Combined
+)
+rownames(annotation_group) <- Rename_basal$Sample_ID
+annotation_colors <- list(
+  Combined = c("LeanPreBasal" ="skyblue1", "ObesePreBasal"="mediumpurple1", "T2DPreBasal"="plum1","LeanPostBasal"="deepskyblue4",   "ObesePostBasal"="purple4", "T2DPostBasal"="magenta3"))
+
+heatmap <- pheatmap::pheatmap(
+  z_scored_df_basal_ordered,
+  scale = 'row',
+  cluster_rows = TRUE,
+  cluster_cols = F,
+  show_rownames = FALSE,
+  color = colorRampPalette(c("navy", "white", "red"))(50),
+  cellwidth = 2,
+  border_color = NA,
+  annotation_col = annotation_group,
+  annotation_colors = annotation_colors
+)
+
+
+```
+
+
+```{r Mvalue correlated to HIIT-logFC}
+
+
+### load clinical data
+
+## only basal samples
+clin_filt <- clin[complete.cases(clin),]
+
+Rename_basal <- Rename %>%
+    filter(Condition == "Basal")
+
+proteome_dataset_basal <- proteome_dataset[, colnames(proteome_dataset) %in% Rename_basal$Sample_ID]
+
+
+clin_filt_ordered <- clin_filt[match(colnames(proteome_dataset_basal), clin_filt$Sample_ID), ]
+Rename_basal_ordered <- Rename_basal[match(colnames(proteome_dataset_basal), Rename_basal$Sample_ID), ]
+
+clin_ordered <- clin[match(colnames(proteome_dataset), clin$Sample_ID), ]
+Rename_ordered <- Rename[match(colnames(proteome_dataset), Rename$Sample_ID), ]
+
+
+############################ FIGURE S3G #################################
+
+table_MainEffect_Training_renamed <- table_MainEffect_Training %>%
+  rename_with(.fn = ~ paste0("Training_", .x), .cols = -Protein)
+
+# Merge with correlation results
+merged_cor_logFC_pre <- cor_pre_df %>%
+  left_join(table_MainEffect_Training_renamed, by = "Protein")
+
+merged_cor_logFC_pre <- merged_cor_logFC_pre %>%
+  mutate(Color = case_when(
+    p_value < 0.05 & Training_adj.P.Val < 0.05 ~ "darkgreen",
+    p_value < 0.05 ~ "darkolivegreen1",
+    Training_adj.P.Val < 0.05 ~ "aquamarine3",
+    TRUE ~ "grey80"
+  ))
+
+table(merged_cor_logFC_pre$Color)
+# darkgreen: 213 proteins
+
+label_proteins <- c("PRKAG2", "PRKAG3", "PRKAA1", "ECPAS", "S100A13", "DEPTOR", "ABHD11")
+
+label_df <- merged_cor_logFC_pre %>% 
+  filter(Protein %in% label_proteins)
+
+p <- ggplot(merged_cor_logFC_pre, aes(x = Training_logFC, y = coefficient)) +
+  geom_point(aes(color = Color), alpha = 0.5, size = 0.1) +
+  geom_text_repel(
+    data = label_df,
+    aes(label = Protein, color = Color),
+    size = 2,
+    box.padding = 0.2,
+    point.padding = 0.2,
+    segment.color = "grey40",
+    segment.size = 0.2,
+    max.overlaps = Inf,
+    min.segment.length = 0
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 0.1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.1) +
+  scale_color_identity() +
+  theme_bw() +
+  labs(
+    title = "Correlation Coefficient vs. Training logFC",
+    x = "logFC (Post - Pre)",
+    y = "Pearson correlation coefficient (M-value, Pre HIIT)"
+  ) +
+  theme(
+    text = element_text(size = 6),
+    axis.title = element_text(size = 6),
+    axis.text = element_text(size = 6),
+    plot.title = element_text(size = 6)
+  )
+p
+
+```
+
+
+```{r Correlation: insulin sensitivy and HIIT-response}
+
+###################### FIGURE 3E #################################
+
+
+## load Mvalue correlation data from Larsen et al., supplementary table S6
+
+Larsen_cor_proteins <- Larsen_cor$Gene_name
+# 2974
+proteins_HIIT <- table_MainEffect_Training$Protein
+# 5385
+
+shared_proteins <- intersect(Larsen_cor_proteins, proteins_HIIT)
+# 2844
+
+shared_proteins_cor <- as.data.frame(shared_proteins)
+shared_proteins_cor$logFC <- table_MainEffect_Training$logFC[match(shared_proteins_cor$shared_proteins, table_MainEffect_Training$Protein)]
+shared_proteins_cor$Mvalue_estimate <- Larsen_cor$`M-value estimate`[match(shared_proteins_cor$shared_proteins, Larsen_cor$Gene_name)]
+    
+
+plot <- ggplot(shared_proteins_cor, aes(x = Mvalue_estimate, y = logFC)) +
+    geom_point(alpha = 6) +
+    labs(title = "Correlation between training main effect logFC and Mvalue corr (Larsen et al.)") +
+    xlab("Mvalue Kendall correlation") +
+    ylab("Training main effect logFC (Post-Pre)") +
+    theme_classic()
+print(plot)
+
+
+## filter for proteins with an adjPvalue (Larsen correlation) < 0.05 
+Larsen_cor_proteins_sig <- Larsen_cor %>%
+    filter(`M-value adj.P.value` < 0.05) %>%
+    pull(Gene_name)
+# 136
+
+shared_proteins1 <- intersect(Larsen_cor_proteins_sig, proteins_HIIT)
+# 135
+
+shared_proteins_cor1 <- as.data.frame(shared_proteins1)
+shared_proteins_cor1$logFC <- table_MainEffect_Training$logFC[match(shared_proteins_cor1$shared_proteins1, table_MainEffect_Training$Protein)]
+shared_proteins_cor1$Mvalue_estimate <- Larsen_cor$`M-value estimate`[match(shared_proteins_cor1$shared_proteins1, Larsen_cor$Gene_name)]
+shared_proteins_cor1$adjP <- table_MainEffect_Training$adj.P.Val[match(shared_proteins_cor1$shared_proteins1, table_MainEffect_Training$Protein)]
+    
+shared_proteins_cor1 <- shared_proteins_cor1 %>%
+    mutate(
+        significance = case_when(
+            adjP < 0.05 ~ "p < 0.05",
+            adjP < 0.1 ~ "p < 0.1",
+            TRUE ~ "not significant"
+        ),
+        label = ifelse(adjP < 0.1, shared_proteins1, NA) # Label significant proteins
+    )
+
+
+
+plot <- ggplot(shared_proteins_cor1, aes(x = Mvalue_estimate, y = logFC, color = significance)) +
+    geom_point(alpha = 0.8, size = 1) +
+    geom_text_repel(aes(label = label), size = 2, max.overlaps = 60) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "darkgreen") +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+    scale_color_manual(
+        values = c("p < 0.05" = "darkgreen", "p < 0.1" = "lightgreen", "not significant" = "grey")
+    ) +
+    labs(
+        title = "Training main effect logFC and Mvalue corr (Larsen et al. adjP<0.05)",
+        color = "Significance"
+    ) +
+    xlab("Mvalue Kendall correlation") +
+    ylab("Training main effect logFC (Post-Pre)") +
+    theme_classic(base_size = 6) +  # Set base font size for everything
+    theme(
+        axis.title = element_text(size = 6),
+        axis.text = element_text(size = 6),
+        plot.title = element_text(size = 6, face = "bold"),
+        legend.title = element_text(size = 6),
+        legend.text = element_text(size = 6)
+    )
+
+
+print(plot)
+
+# Count the number of proteins for each significance category
+significant_counts <- shared_proteins_cor1 %>%
+    group_by(significance) %>%
+    summarise(Count = n())
+
+# Print the counts
+print(significant_counts)
+# not sig: 70
+# <0.05 : 57
+# 0.1 : 8
+
+```
+
+
+```{r Overrepresented GWAS traits}
+
+
+#### load GWAS data, eg:
+# GWAS <- read.delim(here::here("data-raw/gwas_catalog_v1.0-associations_e112_r2024-05-20.tsv"), header = TRUE, quote = "")
+
+# background: all proteins in proteomics dataset
+all_proteins <- unique(Proteome_training$Protein)
+
+# foreground: significantly training-regulated proteins
+sig_proteins <- unique(Proteome_training$Protein[Proteome_training$adj.P.Val < 0.05])
+
+enrichment_results <- list()
+
+## store protein names with trait
+# loop through each unique GWAS trait
+for (trait in unique(GWAS$DISEASE.TRAIT)) {
+    gwas_trait <- subset(GWAS, DISEASE.TRAIT == trait)
+    reported <- unlist(strsplit(gwas_trait$REPORTED.GENE.S., ","))
+    mapped <- unlist(strsplit(gwas_trait$MAPPED_GENE, ","))
+    trait_genes <- unique(trimws(c(reported, mapped)))
+
+    overlapping_proteins <- intersect(sig_proteins, trait_genes)
+
+    overlap <- length(overlapping_proteins)
+    not_in_sig <- length(setdiff(trait_genes, sig_proteins))
+    in_sig_not_in_trait <- length(setdiff(sig_proteins, trait_genes))
+    rest <- length(setdiff(all_proteins, union(sig_proteins, trait_genes)))
+
+    contingency <- matrix(c(overlap, not_in_sig, in_sig_not_in_trait, rest), nrow = 2)
+    fisher <- fisher.test(contingency)
+
+    enrichment_results[[trait]] <- data.frame(
+        Trait = trait,
+        Overlap = overlap,
+        p.value = fisher$p.value,
+        OddsRatio = fisher$estimate,
+        Proteins = paste(overlapping_proteins, collapse = ";")  # <-- Add this line
+    )
+}
+
+enrichment_df <- do.call(rbind, enrichment_results)
+
+# adj p-values
+enrichment_df$adj.p.value <- p.adjust(enrichment_df$p.value, method = "BH")
+enrichment_df <- enrichment_df[order(enrichment_df$adj.p.value), ]
+
+enrichment_df_filter <- enrichment_df %>%
+    filter(adj.p.value < 0.05 & Overlap >= 10) 
+
+
+protein_trait_map <- enrichment_df %>%
+    filter(adj.p.value < 0.05 & Overlap >= 10) %>%
+    separate_rows(Proteins, sep = ";")
+
+
+sig_traits <- subset(enrichment_df, adj.p.value < 0.05) # 1033
+
+
+############################# FIGURE 3G ##############################
+
+top_n <- 20  # adjust as needed
+ggplot(head(enrichment_df, top_n), aes(x = reorder(Trait, -log10(adj.p.value)), y = -log10(adj.p.value))) +
+    geom_col(fill = "steelblue") +
+    coord_flip() +
+    labs(title = "Top Enriched GWAS Traits (Proteome)",
+         x = "GWAS Trait",
+         y = "-log10(adj p-value)") +
+    theme_minimal()
+
+
+# Filter and sort by adjusted p-value and filter for at least xx proteins
+top_traits <- enrichment_df[enrichment_df$adj.p.value < 0.05 & enrichment_df$Overlap > 30, ]
+top_traits <- head(top_traits[order(top_traits$adj.p.value), ], 20)
+
+plot <- ggplot(top_traits, aes(x = reorder(Trait, -log10(adj.p.value)),
+                        y = -log10(adj.p.value),
+                        size = Overlap)) +
+    geom_point(color = "darkblue") +
+    coord_flip() +
+    labs(title = "Overrepresented GWAS Traits
+         in Training regulated proteins",
+         x = "Trait",
+         y = "-log10(adj p-value)",
+         size = "Number of regulated proteins
+    associated with Trait (> 30)") +
+    theme_minimal()+
+    theme(legend.position = "bottom")
+plot
+
+plot <- ggplot(top_traits, aes(x = reorder(Trait, -log10(adj.p.value)),
+                               y = -log10(adj.p.value),
+                               size = Overlap,
+                               color = Overlap)) +
+    geom_point(color = "darkblue") +
+    coord_flip() +
+    labs(title = "Overrepresented GWAS Traits\nin Training regulated proteins",
+         x = "Trait",
+         y = "-log10(adj p-value)",
+         size = "Number of regulated proteins\nassociated with Trait (> 30)") +
+    theme_minimal(base_size = 6) +
+    theme(legend.position = "bottom")
+
+
+plot
+
+
+```
+
+
+
+
+
