@@ -1,0 +1,97 @@
+---
+title: "Primary_myotube_proteome"
+author: "FLS"
+format: html echo: true
+  warning: false 
+  message: false
+---
+
+```{r setup}
+source(here::here("libraries.R"))
+
+```
+
+```{r Primary myotube cells}
+
+raw <- read.delim(here::here("data-raw/PrimaryMyotubes_Proteome_Report.tsv"), header = TRUE, na.strings = c("NaN"))
+# 7922 x 11 (7 samples)
+
+# load metadata
+#meta_scr <- xx
+
+
+# name rows by unique gene name
+raw$PG.Genes %>% duplicated() %>% any()
+# TRUE
+raw %>% group_by(PG.Genes) %>% summarize(frequency = n()) %>%
+    arrange(desc(frequency)) %>% filter(frequency > 1)
+raw_unique <- make_unique(raw, "PG.Genes", "PG.UniProtIds", delim = ";")
+raw_unique$name %>% duplicated() %>% any()
+# FALSE
+rownames(raw_unique) <- raw_unique$name
+
+
+# convert NA's and log2 transform the sample columns
+log2 <- raw_unique
+log2[, 5:11] <- apply(raw_unique[, 5:11], 2, function(x) {
+    x <- suppressWarnings(as.numeric(x))
+    ifelse(!is.na(x) & x > 0, log2(x), NA)})
+
+
+
+# rename samples (columns)
+log2_renamed <- log2
+colnames(log2_renamed)[5:11] <- KI$combined
+
+################################# FIGURE S5K #######################################
+
+## dynamic range
+median_intensities <- apply(raw_unique[, 5:11], 1, median, na.rm = TRUE)
+rank_abundance <- rank(-median_intensities)
+median_intensities_log10 <- log10(median_intensities)
+dynamic_range <- data.frame(genes = rownames(raw_unique), RankAbundance = rank_abundance, Log10MedianIntensity = median_intensities_log10)
+
+dynamic_range <- dynamic_range %>%
+    mutate(PointColor = "darkblue")
+
+label_low <- c("PRKAA1", "PRKAA2", "PRKAB1", "PRKAB2", "PRKAG1", "PRKAG2", "PRKAG3")
+label_low_data <- list()
+for (gene in label_low) {
+    gene_subset <- dynamic_range[dynamic_range$genes == gene, ]
+    label_low_data[[gene]] <- gene_subset
+}
+labels_low <- do.call(rbind, label_low_data)
+
+dyn <- ggplot(dynamic_range, aes(x = RankAbundance, y = Log10MedianIntensity)) +
+    geom_point(aes(color = PointColor), alpha = 0.3, shape = 21) +
+    labs(x = "Protein Rank Abundance", y = "Log10 Median Intensity") +
+    theme_classic() +
+    guides(color = guide_legend(na.rm = TRUE)) +
+    geom_text_repel(
+        data = labels_low,
+        aes(label = genes, color = PointColor),  
+        size= 1.5,
+        nudge_y = -0.5,  
+        nudge_x = -1300,
+        force = 30,  
+        box.padding = 0.1, 
+        point.padding = 0,  
+        max.overlaps = Inf,
+        segment.size = 0.3,
+        segment.alpha = 0.7,
+        min.segment.length = unit(0, "lines")
+    ) +
+    scale_color_identity() + 
+    theme(
+        text = element_text(face = "bold", colour = "black", size = 6),
+        legend.position = "none"
+    )
+
+dyn
+
+
+```
+
+
+
+

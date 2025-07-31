@@ -15,7 +15,7 @@ source(here::here("libraries.R"))
 
 ```{r load raw data}
 
-raw <- read.delim(here::here("data-raw/20231011_161204_directDIAphospho_HIIThumanMuscle_HTRMS_version18.3_FS_collapsed_table.txt"), header = TRUE, na.strings = c("NaN"))
+raw <- read.delim(here::here("data-raw/directDIA_Phosphoproteome_collapsed_table.txt"), header = TRUE, na.strings = c("NaN"))
 
 nrow(raw)
 # 47447

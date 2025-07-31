@@ -24,7 +24,7 @@ ncol(raw)
 # 169
 
 # meta data
-Rename <- read_excel(here::here("data-raw/Rename.xlsx"))
+#Rename <- read_excel(here::here("data-raw/Rename.xlsx"))
 
 ```
 
@@ -2937,10 +2937,81 @@ heatmap <- pheatmap::pheatmap(
 ```
 
 
-```{r Mvalue correlated to HIIT-logFC}
-
+```{r Mvalue correlated to HIIT-logFC - CORRECT HERE XXXXXXXXXXXXXXXXXXXXXXXXXXXx}
 
 ### load clinical data
+## only basal samples
+clin_filt <- clin[complete.cases(clin),]
+
+Rename_basal <- Rename %>%
+    filter(Condition == "Basal")
+
+proteome_dataset_basal <- proteome_dataset[, colnames(proteome_dataset) %in% Rename_basal$Sample_ID]
+
+# same order of samples
+clin_filt_ordered <- clin_filt[match(colnames(proteome_dataset_basal), clin_filt$Sample_ID), ]
+Rename_basal_ordered <- Rename_basal[match(colnames(proteome_dataset_basal), Rename_basal$Sample_ID), ]
+
+
+
+
+
+
+# Step 1: Subset PreBasal clinical data
+clin_filt_pre <- clin_filt_ordered %>% 
+  filter(TimeCond == "PreBasal")
+
+# Step 2: Keep only samples that exist in the expression data
+valid_pre_ids <- intersect(clin_filt_pre$Sample_ID, colnames(proteome_dataset_basal))
+clin_filt_pre <- clin_filt_pre %>% filter(Sample_ID %in% valid_pre_ids)
+
+# Step 3: Subset expression matrix using valid Sample_IDs
+proteome_dataset_basal_pre <- proteome_dataset_basal[, valid_pre_ids]
+
+# Step 4: Reorder clin_filt_pre to match expression column order
+clin_filt_pre <- clin_filt_pre[match(colnames(proteome_dataset_basal_pre), clin_filt_pre$Sample_ID), ]
+
+# Step 5: Sanity check
+stopifnot(all(clin_filt_pre$Sample_ID == colnames(proteome_dataset_basal_pre)))
+
+# Step 6: Combine Mvalue and expression data
+cor_data_pre <- cbind(
+  Mvalue = clin_filt_pre$Mvalue,
+  t(proteome_dataset_basal_pre)
+)
+
+# Step 7: Pearson correlation loop
+results_pre <- list()
+row_index <- 1
+
+for (i in 2:ncol(cor_data_pre)) {
+  Protein <- colnames(cor_data_pre)[i]
+
+  if (sum(!is.na(cor_data_pre[, 1]) & !is.na(cor_data_pre[, i])) < 10) next
+
+  test <- cor.test(
+    x = cor_data_pre[, 1],  # M-value
+    y = cor_data_pre[, i],  # Protein expression
+    method = "pearson",
+    use = "pairwise.complete.obs"
+  )
+
+  results_pre[[row_index]] <- c(
+    coefficient = test$estimate,
+    p_value = test$p.value,
+    Protein = Protein
+  )
+  row_index <- row_index + 1
+}
+
+# Step 8: Compile and format results
+cor_pre_df <- do.call(rbind, results_pre) %>% as.data.frame()
+cor_pre_df$coefficient <- as.numeric(cor_pre_df$coefficient)
+cor_pre_df$p_value <- as.numeric(cor_pre_df$p_value)
+cor_pre_df$adjusted_pval <- p.adjust(cor_pre_df$p_value, method = "BH")
+
+
+
 
 ## only basal samples
 clin_filt <- clin[complete.cases(clin),]
@@ -3222,5 +3293,162 @@ plot
 
 
 
+```{r PRKAG2 Peptide level analysis}
+
+## load peptide data
+peptides <- read.delim("C:/Users/bcr992/Desktop/R_script/HIIT_Muscle_Phosphoproteomics_FLS/data-raw/directDIA_Proteome_Report_Peptides.tsv",
+                       header = TRUE, na.strings = "NaN")
+
+peptides_DIA <- peptides
+rownames(peptides_DIA) <- peptides$EG.PrecursorId
+
+# keep only sample columns
+peptides_DIA <- peptides_DIA[, 19:182]
+
+
+# remove outlier sample as identified in proteome analysis
+print(colnames(peptides_DIA))
+column_to_remove <- c("X.38..20231115_PRI_TIMS5_NEO4_X1285_P276_R1051_101min_DIA_S38_B.D2_1_8479.d.EG.TotalQuantity..Settings.")
+peptides_DIA <- peptides_DIA[, !colnames(peptides_DIA) %in% column_to_remove, drop = FALSE]
+
+peptides_DIA_renamed <- peptides_DIA
+names(peptides_DIA_renamed) <- substr(names(peptides_DIA_renamed), 58, 70)
+sample_names <- str_extract(names(peptides_DIA_renamed), "S[0-9]+")
+names(peptides_DIA_renamed) <- sample_names
+setdiff(Rename$AnalyticalSampleID, names(peptides_DIA_renamed))
+for (i in 1:nrow(Rename)) {
+    current_col_title <- Rename$AnalyticalSampleID[i]
+    additional_info <- Rename$Sample_ID[i]
+    if (current_col_title %in% names(peptides_DIA_renamed)) {
+        names(peptides_DIA_renamed)[which(names(peptides_DIA_renamed) == current_col_title)] <- additional_info
+    }
+}
+
+### reorder columns
+Rename$Sample_ID <- as.character(Rename$Sample_ID)
+raw_colnames <- colnames(peptides_DIA_renamed)
+matched_cols <- intersect(Rename$Sample_ID, raw_colnames)
+if (length(matched_cols) != length(Rename$Sample_ID)) {
+    warning("Some columns in Rename$Sample_ID were not found in peptides_DIA_renamed")
+}
+
+if (length(matched_cols) == length(Rename$Sample_ID)) {
+    peptides_DIA_renamed <- peptides_DIA_renamed[, match(Rename$Sample_ID, colnames(peptides_DIA_renamed))]
+}
+
+
+
+
+
+
+# log2
+# Convert non-numeric values in the matrix to NA
+raw_NA <- apply(peptides_DIA_renamed, 2, function(x) ifelse(is.na(as.numeric(x)), NA, as.numeric(x)))
+log2_transformed <- apply(raw_NA, 2, function(x) ifelse(is.na(x), NA, log2(x)))
+boxplot(log2_transformed)
+log2 <- peptides_DIA_renamed
+log2[, 1:163] <- log2_transformed
+
+
+
+
+# define PKRAG2 peptides
+PRKAG2 <- peptides %>%
+    filter(grepl("PRKAG2", PG.Genes))
+peptides_PRKAG2 <- PRKAG2$EG.PrecursorId
+# pull only PRKAG2 peptides
+data_PRKAG2_peptides <- log2[rownames(log2) %in% peptides_PRKAG2, ]
+
+
+# Step 1: Get PRKAG2 precursor IDs
+PRKAG2 <- peptides %>% filter(grepl("PRKAG2", PG.Genes))
+peptides_PRKAG2 <- PRKAG2$EG.PrecursorId
+
+# Step 2: Subset from log2
+log2_PRKAG2 <- log2[rownames(log2) %in% peptides_PRKAG2, , drop = FALSE]
+log2_PRKAG2$EG.PrecursorId <- rownames(log2_PRKAG2)
+
+# Step 3: Join stripped sequences
+log2_PRKAG2 <- log2_PRKAG2 %>%
+  left_join(
+    peptides %>% dplyr::select(EG.PrecursorId, PEP.StrippedSequence),
+    by = "EG.PrecursorId"
+  )
+
+# Step 4: Ensure numeric sample columns (replace 5:11 with your correct range)
+sample_cols <- colnames(log2)[1:163]
+log2_PRKAG2[sample_cols] <- lapply(log2_PRKAG2[sample_cols], as.numeric)
+
+# Step 5: Collapse by stripped sequence
+log2_PRKAG2_collapsed <- log2_PRKAG2 %>%
+  group_by(PEP.StrippedSequence) %>%
+  summarise(across(all_of(sample_cols), ~mean(.x, na.rm = TRUE)), .groups = "drop")
+
+# Step 6: Set rownames
+log2_PRKAG2_matrix <- as.data.frame(log2_PRKAG2_collapsed)
+rownames(log2_PRKAG2_matrix) <- log2_PRKAG2_matrix$PEP.StrippedSequence
+log2_PRKAG2_matrix$PEP.StrippedSequence <- NULL
+
+
+
+################################## FIGURE 6C #############################################
+
+# 1. Convert collapsed matrix to long format
+data_long <- log2_PRKAG2_matrix %>%
+  rownames_to_column("Peptide") %>%
+  pivot_longer(-Peptide, names_to = "Sample", values_to = "log2_expression")
+
+# 2. Join with metadata to get Timepoint info
+data_long <- data_long %>%
+  left_join(Rename %>% dplyr::select(Sample_ID, Timepoint), by = c("Sample" = "Sample_ID"))
+
+# 3. Z-score within each peptide
+data_long_z <- data_long %>%
+  group_by(Peptide) %>%
+  mutate(z_score_expression = scale(log2_expression, center = TRUE, scale = TRUE)) %>%
+  ungroup()
+
+# 4. Summarise mean Z-score per peptide and timepoint
+data_summary <- data_long_z %>%
+  group_by(Peptide, Timepoint) %>%
+  summarise(mean_z_score = mean(z_score_expression, na.rm = TRUE), .groups = 'drop')
+
+# 5. Order peptides and timepoints
+data_summary$Timepoint <- factor(data_summary$Timepoint, levels = c("Pre", "Post"))
+data_summary$Peptide <- factor(data_summary$Peptide, levels = unique(data_summary$Peptide)) 
+
+print(data_summary$Peptide)
+
+desired_order <- c("VHIPDLSSFAMPLLDGDLEGSGK",
+                   "QHTFPLESYK",
+                   "IYASSSPPDTGQR",
+                   "AAALAAALGPAEAGMLEK",
+                   "CYDIVPTSSK",
+                   "LVVFDTTLQVK",
+                   "LPVIDPISGNALYILTHK",
+                   "FLQLFMSDMPK",
+                   "QNLDELGIGTYHNIAFIHPDTPIIK",
+                   "ALNIFVER",
+                   "TYNNLDITVTQALQHR",
+                   "SQYFEGVVK" ,
+                   "LEILETIVDR")  # based on `PEP.StrippedSequence`
+data_summary$Peptide <- factor(data_summary$Peptide, levels = desired_order)
+
+
+color_fill <- c("Pre" = "white", "Post" = "mistyrose1")
+color_outline <- c("Pre" = "grey40", "Post" = "purple4")
+
+strippedsequence_mean <- ggplot(data_summary, aes(x = Peptide, y = mean_z_score, fill = Timepoint, color = Timepoint)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.5)) +
+  labs(title = "Mean Z-scored log2 expression for PRKAG2 peptides",
+       x = "Stripped Peptide Sequence",
+       y = "Mean Z-score") +
+  scale_fill_manual(values = color_fill) +
+  scale_color_manual(values = color_outline) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+strippedsequence_mean
+
+```
 
 

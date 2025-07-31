@@ -1,0 +1,712 @@
+---
+title: "IP_interactome"
+author: "FLS"
+format: html
+execute:
+  echo: true
+  warning: false 
+  message: false
+---
+
+```{r setup}
+
+source(here::here("libraries.R"))
+
+```
+
+
+```{r raw data}
+
+
+#### load IP data and metadata
+#IP_metadata <- xx
+seqIP <- read.table(here::here("data-raw/IP_proteinGroups.txt"),
+                    header = TRUE,
+                    sep = "\t",
+                    na.strings = c("NaN"),
+                    check.names = FALSE)
+
+## wrangling
+seqIP_intensity <- seqIP %>%
+    dplyr::select(contains("Intensity"), `Gene names`, `Protein IDs`) %>%
+    dplyr::select(-contains("LFQ"))
+seqIP_intensity <- seqIP_intensity %>%
+    mutate(`Gene names` = ifelse(is.na(`Gene names`) | `Gene names` == "", `Protein IDs`, `Gene names`))
+
+row.names(seqIP_intensity) <- seqIP_intensity$`Gene names`
+seqIP_intensity <- seqIP_intensity %>%
+    dplyr::select(-`Gene names`, -`Protein IDs`, -`Intensity`)
+seqIP_intensity <- seqIP_intensity %>%
+    rownames_to_column(var = "Gene")  
+
+column_mapping <- set_names(IP_metadata$Sample, IP_metadata$Mqpeptides)
+new_colnames <- colnames(seqIP_intensity)[-1]  
+matched_indices <- match(new_colnames, IP_metadata$Mqpeptides)
+new_colnames[!is.na(matched_indices)] <- IP_metadata$Sample[matched_indices[!is.na(matched_indices)]]
+colnames(seqIP_intensity)[-1] <- new_colnames 
+
+merged_data <- seqIP_intensity %>%
+    pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Intensity") %>%  # Keep "Gene" in long format
+    left_join(IP_metadata, by = "Sample") %>%
+    mutate(Intensity = ifelse(Intensity == 0, NA, Intensity))  # Replace 0 with NA
+
+
+```
+
+
+```{r dynamic range plots}
+
+dynamic_range <- merged_data %>%
+    group_by(Gene, Bait) %>%
+    summarise(median_Intensity = median(Intensity, na.rm = TRUE), .groups = "drop") %>%
+    mutate(RankAbundance = rank(-median_Intensity),
+           Log10MedianIntensity = log10(median_Intensity))
+
+label_genes <- c("PRKAA1", "PRKAA2", "PRKAB1", "PRKAB2", "PRKAG1", "PRKAG2", "PRKAG3")
+labels <- dynamic_range %>%
+    filter(Gene %in% label_genes)
+
+dynamic_range_a1 <- dynamic_range %>% filter(Bait == "a1")
+dynamic_range_a2 <- dynamic_range %>% filter(Bait == "a2")
+
+ggplot(dynamic_range_a1, aes(x = RankAbundance, y = Log10MedianIntensity)) +
+    geom_point(color = "violet", alpha = 0.3, shape = 21) +
+    geom_text_repel(data = labels %>% filter(Bait == "a1"), aes(label = Gene), size = 3) +
+    theme_classic() +
+    labs(title = "Dynamic Range - A1")
+
+ggplot(dynamic_range_a2, aes(x = RankAbundance, y = Log10MedianIntensity)) +
+    geom_point(color = "purple3", alpha = 0.3, shape = 21) +
+    geom_text_repel(data = labels %>% filter(Bait == "a2"), aes(label = Gene), size = 3) +
+    theme_classic() +
+    labs(title = "Dynamic Range - A2")
+
+
+```
+
+
+
+```{r log2}
+
+raw_long <- merged_data %>%
+    drop_na(Intensity) %>%
+    dplyr::select(Sample, Intensity)
+
+ggplot(raw_long, aes(x = Sample, y = Intensity, fill = Sample)) +
+    geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
+    theme_minimal() +
+    labs(title = "raw Intensity Distribution per Sample", x = "Sample", y = "Intensity") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          legend.position = "none")
+
+
+
+merged_data <- merged_data %>%
+    mutate(log2_Intensity = log2(Intensity))
+
+
+
+
+log2_long <- merged_data %>%
+    drop_na(log2_Intensity) %>%
+    dplyr::select(Sample, log2_Intensity)
+
+ggplot(log2_long, aes(x = Sample, y = log2_Intensity, fill = Sample)) +
+    geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
+    theme_minimal() +
+    labs(title = "Log2 Intensity Distribution per Sample", x = "Sample", y = "Log2 Intensity") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          legend.position = "none")
+
+
+
+```
+
+```{r filter}
+
+# 50% valid intensity values in at least one Bait group
+filter50p <- merged_data %>%
+    group_by(Gene, Bait) %>%
+    summarise(valid_proportion = mean(!is.na(log2_Intensity)), .groups = "drop") %>%
+    filter(valid_proportion >= 0.50) %>%
+    dplyr::select(Gene, Bait)  
+
+filtered_data <- merged_data %>%
+    inner_join(filter50p, by = c("Gene", "Bait"))
+
+#remaining unique proteins
+filtered_protein_count <- filtered_data %>%
+    distinct(Gene) %>%
+    nrow()
+print(filtered_protein_count) 
+# 961
+
+
+
+
+seqIP_log2_filter_widematrix <- filtered_data %>%
+  dplyr::select(Gene, Sample, log2_Intensity) %>%
+  pivot_wider(names_from = Sample, values_from = log2_Intensity) %>%
+  column_to_rownames("Gene") %>%
+  as.matrix()
+
+
+
+
+```
+
+
+```{r PCA}
+
+pca_input <- merged_data %>%
+    dplyr::select(Gene, Sample, log2_Intensity, Bait, Timepoint) %>%  
+    group_by(Gene, Sample) %>%
+    summarise(log2_Intensity = mean(log2_Intensity, na.rm = TRUE), .groups = "drop") %>%  
+    pivot_wider(names_from = Sample, values_from = log2_Intensity) %>%  
+    column_to_rownames("Gene")  
+
+metadata_pca <- merged_data %>%
+    dplyr::select(Sample, Bait, Timepoint) %>%
+    distinct()  
+
+pca_input <- pca_input[complete.cases(pca_input), ]
+
+# Transpose
+pca_transposed <- as.data.frame(t(pca_input))
+
+pca_object <- prcomp(pca_transposed, scale = FALSE, center = TRUE)
+
+data_pca <- as.data.frame(pca_object$x) %>%
+    dplyr::select(PC1, PC2) 
+
+data_pca$Sample <- rownames(data_pca)
+
+data_pca <- data_pca %>%
+    inner_join(metadata_pca, by = "Sample")  
+
+
+pca_ID <- ggplot(
+    data_pca,
+    aes(
+        x = PC1,
+        y = PC2,
+        label = Sample,
+        color = Bait, 
+        shape = Timepoint  
+    )
+) +
+    geom_point(size = 3) +
+    theme_light() +
+    ggtitle("PCA - log2 Intensity Filtered") +
+    geom_text(aes(label = Sample), vjust = -0.5, hjust = 0.5, size = 3, color = "black")
+
+
+plotly::ggplotly(pca_ID)
+
+# variance explained by each PC
+fviz_eig(pca_object, addlabels = TRUE) +
+    theme_light() +
+    ggtitle("Eigenvalues")
+# 58%, 11.6%
+
+```
+
+
+
+```{r scale pull-down to bait proteins}
+
+
+################################## FIGURE 6D ##############################
+
+# Normalize a1 dataset to PRKAA1
+normalized_a1 <- merged_data %>%
+  filter(Bait == "a1", Gene %in% selected_genes) %>%
+  group_by(ID) %>%
+  mutate(
+    bait_expression = log2_Intensity[Gene == "PRKAA1"],
+    log2_scaled = log2_Intensity - bait_expression
+  ) %>%
+  ungroup()
+
+normalized_a1 <- normalized_a1 %>%
+  mutate(
+    y_value = if_else(Gene == "PRKAA1", log2_Intensity, log2_scaled),
+    scale_type = if_else(Gene == "PRKAA1", "Raw (unscaled)", "Scaled to PRKAA1")
+  )
+
+# normalize pull-downs for a2
+normalized_a2 <- merged_data %>%
+  filter(Bait == "a2", Gene %in% selected_genes) %>%
+  group_by(ID) %>%
+  mutate(
+    bait_expression = log2_Intensity[Gene == "PRKAA2"],
+    log2_scaled = log2_Intensity - bait_expression
+  ) %>%
+  ungroup() %>%
+  mutate(
+    y_value = if_else(Gene == "PRKAA2", log2_Intensity, log2_scaled),
+    scale_type = if_else(Gene == "PRKAA2", "Raw (unscaled)", "Scaled to PRKAA2")
+  )
+
+
+
+plot_boxplot_mixed <- function(data, title) {
+  data$Timepoint <- factor(data$Timepoint, levels = c("Pre", "Post"))
+
+  ggplot(data, aes(x = Timepoint, y = y_value, fill = Timepoint)) +
+    geom_boxplot(outlier.size = 0.01, size = 0.2, fatten = 0.8, color = "black", width = 0.6) +
+    geom_point(aes(color = Group), size = 0.8, alpha = 0.6,
+               position = position_jitter(width = 0.1)) +
+    geom_line(aes(group = Participant, color = Group), size = 0.2, alpha = 0.5) +
+    facet_wrap(~ Gene, scales = "free_y", ncol = 1) +
+    labs(
+      title = title,
+      x = "",
+      y = "Expression (log2 scaled or raw)",
+      subtitle = "Bait protein shown in raw values; others normalized to bait"
+    ) +
+    scale_fill_manual(values = color_fill) +
+    scale_color_manual(values = color_groups) +
+    theme_classic() +
+    theme(
+      legend.position = "none",
+      axis.title.x = element_blank(),
+      axis.text.x = element_text(size = 6),
+      strip.text = element_text(size = 6),
+      text = element_text(size = 6),
+      axis.title = element_text(size = 6),
+      axis.text = element_text(size = 6),
+      plot.title = element_text(size = 6, face = "bold"),
+      plot.subtitle = element_text(size = 5)
+    )
+}
+
+
+
+plot_a1 <-plot_boxplot_mixed(normalized_a1, "a1: Bait raw, others normalized")
+plot_a2 <- plot_boxplot_mixed(normalized_a2, "a2: Bait raw, others normalized")
+
+p <- plot_a1 | plot_a2
+
+
+
+```
+
+
+
+```{r LIMMA}
+
+# wide format matrix for LIMMA
+seqIP_log2_filter_widematrix <- filtered_data %>%
+  dplyr::select(Gene, Sample, log2_Intensity) %>%
+  pivot_wider(names_from = Sample, values_from = log2_Intensity) %>%
+  column_to_rownames("Gene") %>%
+  as.matrix()
+
+
+IP_metadata <- IP_metadata %>% 
+  filter(Sample %in% colnames(seqIP_log2_filter_widematrix)) %>%
+  arrange(match(Sample, colnames(seqIP_log2_filter_widematrix)))
+
+
+IP_metadata$Combined <- paste(IP_metadata$Bait, IP_metadata$Group, IP_metadata$Timepoint, sep = "_")
+
+Bait <- factor(IP_metadata$Bait, levels=c("a1", "a2"))
+Group <- factor(IP_metadata$Group, levels=c("Lean","Obese","T2D"))
+Training <- factor(IP_metadata$Timepoint, levels=c("Pre", "Post"))
+Combined <- factor(IP_metadata$Combined, levels = c("a1_Lean_Pre", "a2_Lean_Pre", "a1_Lean_Post", "a2_Lean_Post", "a1_Obese_Pre", "a2_Obese_Pre", "a1_Obese_Post", "a2_Obese_Post", "a1_T2D_Pre", "a2_T2D_Pre", "a1_T2D_Post", "a2_T2D_Post"))
+
+
+
+################ split data by bait
+
+a1_data <- filtered_data %>% filter(Bait == "a1")
+a2_data <- filtered_data %>% filter(Bait == "a2")
+
+expr_a1 <- a1_data %>%
+  dplyr::select(Gene, Sample, log2_Intensity) %>%
+  pivot_wider(names_from = Sample, values_from = log2_Intensity) %>%
+  column_to_rownames("Gene") %>%
+  as.matrix()
+
+expr_a2 <- a2_data %>%
+  dplyr::select(Gene, Sample, log2_Intensity) %>%
+  pivot_wider(names_from = Sample, values_from = log2_Intensity) %>%
+  column_to_rownames("Gene") %>%
+  as.matrix()
+
+meta_a1 <- IP_metadata %>% filter(Sample %in% colnames(expr_a1)) %>% arrange(match(Sample, colnames(expr_a1)))
+meta_a2 <- IP_metadata %>% filter(Sample %in% colnames(expr_a2)) %>% arrange(match(Sample, colnames(expr_a2)))
+
+design_a1 <- model.matrix(~ 0 + Group + Timepoint, data = meta_a1)
+design_a2 <- model.matrix(~ 0+  Group + Timepoint, data = meta_a2)
+
+corfit_a1 <- duplicateCorrelation(expr_a1, design_a1, block = meta_a1$Participant)
+corfit_a2 <- duplicateCorrelation(expr_a2, design_a2, block = meta_a2$Participant)
+
+fit_a1 <- lmFit(expr_a1, design_a1, block = meta_a1$Participant, correlation = corfit_a1$consensus)
+fit_a2 <- lmFit(expr_a2, design_a2, block = meta_a2$Participant, correlation = corfit_a2$consensus)
+
+fit2_a1 <- eBayes(fit_a1)
+fit2_a2 <- eBayes(fit_a2)
+
+table_MainEffect_Training_a1 <- topTable(fit2_a1, coef = 4, number = Inf, adjust = "fdr")
+table_MainEffect_Training_a1$Protein <- rownames(table_MainEffect_Training_a1)
+table_MainEffect_Training_a2 <- topTable(fit2_a2, coef = "TimepointPre", number = Inf, adjust = "fdr")
+table_MainEffect_Training_a2$Protein <- rownames(table_MainEffect_Training_a2)
+
+
+
+##################### specific contrasts
+
+design_combined <- model.matrix(~ 0 + Combined)
+corfit__combined <- duplicateCorrelation(seqIP_log2_filter_widematrix, design_combined, block=IP_metadata$Participant)
+corfit__combined$consensus
+# 0.1580649
+fit_combined <- lmFit(seqIP_log2_filter_widematrix, design_combined, block=IP_metadata$Participant, correlation=corfit__combined$consensus)
+
+cm_all <- makeContrasts(
+
+  # --- GROUP DIFFERENCES ---
+
+  # Pre
+  Lean_vs_T2D_a1_Pre = Combineda1_Lean_Pre - Combineda1_T2D_Pre,
+  Lean_vs_T2D_a2_Pre = Combineda2_Lean_Pre - Combineda2_T2D_Pre,
+  Obese_vs_T2D_a1_Pre = Combineda1_Obese_Pre - Combineda1_T2D_Pre,
+  Obese_vs_T2D_a2_Pre = Combineda2_Obese_Pre - Combineda2_T2D_Pre,
+  Lean_vs_Obese_a1_Pre = Combineda1_Lean_Pre - Combineda1_Obese_Pre,
+  Lean_vs_Obese_a2_Pre = Combineda2_Lean_Pre - Combineda2_Obese_Pre,
+
+  # Post
+  Lean_vs_T2D_a1_Post = Combineda1_Lean_Post - Combineda1_T2D_Post,
+  Lean_vs_T2D_a2_Post = Combineda2_Lean_Post - Combineda2_T2D_Post,
+  Obese_vs_T2D_a1_Post = Combineda1_Obese_Post - Combineda1_T2D_Post,
+  Obese_vs_T2D_a2_Post = Combineda2_Obese_Post - Combineda2_T2D_Post,
+  Lean_vs_Obese_a1_Post = Combineda1_Lean_Post - Combineda1_Obese_Post,
+  Lean_vs_Obese_a2_Post = Combineda2_Lean_Post - Combineda2_Obese_Post,
+
+  # --- TRAINING EFFECTS (Post vs Pre within group + bait) ---
+
+  Lean_training_a1 = Combineda1_Lean_Post - Combineda1_Lean_Pre,
+  Lean_training_a2 = Combineda2_Lean_Post - Combineda2_Lean_Pre,
+  Obese_training_a1 = Combineda1_Obese_Post - Combineda1_Obese_Pre,
+  Obese_training_a2 = Combineda2_Obese_Post - Combineda2_Obese_Pre,
+  T2D_training_a1 = Combineda1_T2D_Post - Combineda1_T2D_Pre,
+  T2D_training_a2 = Combineda2_T2D_Post - Combineda2_T2D_Pre,
+
+  # --- BAIT EFFECTS (a2 - a1) within each group and timepoint ---
+
+  # Pre
+  Lean_bait_Pre = Combineda2_Lean_Pre - Combineda1_Lean_Pre,
+  Obese_bait_Pre = Combineda2_Obese_Pre - Combineda1_Obese_Pre,
+  T2D_bait_Pre = Combineda2_T2D_Pre - Combineda1_T2D_Pre,
+
+  # Post
+  Lean_bait_Post = Combineda2_Lean_Post - Combineda1_Lean_Post,
+  Obese_bait_Post = Combineda2_Obese_Post - Combineda1_Obese_Post,
+  T2D_bait_Post = Combineda2_T2D_Post - Combineda1_T2D_Post,
+
+  levels = design_combined
+)
+
+
+fit2_combined <- eBayes(contrasts.fit(fit_combined, cm_all))
+
+comparisons <- colnames(cm_all)
+
+extract_and_store_full_table <- function(fit, comparison_name, p_value_threshold = 0.05) {
+    full_table <- limma::topTable(fit,
+                                  coef = comparison_name,
+                                  adjust = "BH",
+                                  number = Inf)
+    full_table$Protein <- rownames(full_table)
+    significant_table <- full_table[full_table$adj.P.Val < p_value_threshold, ]
+    significant_table <- na.omit(significant_table)
+    cat("Comparison:", comparison_name, " - Number of significant hits:", nrow(significant_table), "\n")
+    assign(paste0(comparison_name), full_table, envir = .GlobalEnv)
+    return(nrow(significant_table))
+}
+
+for (comparison in comparisons) {
+  extract_and_store_full_table(fit2_combined, comparison)
+}
+
+
+```
+
+
+
+```{r PostIP supernatant data}
+
+# load data
+#PostIP <- read.delim(here::here("data-raw/PostIP_Protein_Report.tsv"), header = TRUE, na.strings = c("NaN"))
+raw <- PostIP
+
+raw$PG.Genes %>% duplicated() %>% any()
+# TRUE
+raw %>% group_by(PG.Genes) %>% summarize(frequency = n()) %>%
+    arrange(desc(frequency)) %>% filter(frequency > 1)
+raw_unique <- make_unique(raw, "PG.Genes", "PG.UniProtIds", delim = ";")
+raw_unique$name %>% duplicated() %>% any()
+# FALSE
+rownames(raw_unique) <- raw_unique$name
+
+
+print(colnames(raw_unique))
+raw_unique_renamed <- raw_unique
+print(colnames(raw_unique_renamed))
+names(raw_unique_renamed)[5:28] <- str_extract(names(raw_unique_renamed)[5:28], "S\\d{2}")
+print(colnames(raw_unique_renamed))
+
+setdiff(PostIP_metadata$AnalyticalSampleID, names(raw_unique_renamed))
+for (i in 1:nrow(PostIP_metadata)) {
+    current_col_title <- PostIP_metadata$AnalyticalSampleID[i]
+    additional_info <- PostIP_metadata$Sample_ID[i]
+    if (current_col_title %in% names(raw_unique_renamed)) {
+        names(raw_unique_renamed)[which(names(raw_unique_renamed) == current_col_title)] <- additional_info
+    }
+}
+print(colnames(raw_unique_renamed))
+
+
+mat_raw <- as.matrix(raw_unique_renamed[, 5:28])
+quanted_raw <- colSums(!is.na(mat_raw))
+quanted_raw <- as.data.frame(quanted_raw)
+average_proteins_per_sample <- quanted_raw %>%
+    summarise(avg_sites = mean(quanted_raw, na.rm = TRUE),
+              std_dev = sd(quanted_raw, na.rm = TRUE))
+print(average_proteins_per_sample)
+# avg_sites  std_dev
+#  6107.083   +-   	78.33757	
+ggplot(data = quanted_raw, aes(x = 1:24, y = quanted_raw)) +
+    geom_bar(stat = "identity", fill = "lightblue3") +
+    labs(title = "Proteins per Sample", x = "Sample", y = "Proteins identified") +
+    theme(axis.text.x = element_text(size = 8, angle = 40, hjust = 1)) +  # Adjust x axis text
+    geom_hline(yintercept = average_proteins_per_sample$avg_sites,
+               linetype = "dashed", color = "maroon3") +  # Add a dashed line for average
+    geom_text(aes(x = 1, y = average_proteins_per_sample$avg_sites + 5),
+              label = paste("Avg:", round(average_proteins_per_sample$avg_sites, 2)),
+              color = "maroon4", vjust = 1.5, hjust = 0, size = 5) +
+    geom_text(aes(x = 1, y = average_proteins_per_sample$avg_sites - average_proteins_per_sample$std_dev - 10),
+              label = paste("SD:", round(average_proteins_per_sample$std_dev, 2)),
+              color = "blue", vjust = 1, hjust = 0, size = 5)
+
+
+
+
+
+median_intensities <- apply(raw_unique_renamed[, 5:28], 1, median, na.rm = TRUE)
+rank_abundance <- rank(-median_intensities)
+median_intensities_log10 <- log10(median_intensities)
+dynamic_range <- data.frame(genes = rownames(raw_unique_renamed), RankAbundance = rank_abundance, Log10MedianIntensity = median_intensities_log10)
+
+dynamic_range <- dynamic_range %>%
+    mutate(PointColor = "grey40")
+
+label <- c("PRKAA1", "PRKAA2", "PRKAB1", "PRKAB2", "PRKAG1", "PRKAG2", "PRKAG3")
+label_data <- list()
+for (gene in label) {
+    gene_subset <- dynamic_range[dynamic_range$genes == gene, ]
+    label_data[[gene]] <- gene_subset
+}
+labels <- do.call(rbind, label_data)
+
+
+dyn <- ggplot(dynamic_range, aes(x = RankAbundance, y = Log10MedianIntensity)) +
+    geom_point(aes(color = PointColor), alpha = 0.3, shape = 21) +
+    labs(x = "Protein Rank Abundance", y = "Log10 Median Intensity") +
+    theme_classic() +
+    guides(color = guide_legend(na.rm = TRUE)) +
+    geom_text_repel(
+        data = labels,
+        aes(label = genes, color = PointColor),  
+        size = 1.5,
+        nudge_y = 0.5, 
+        nudge_x = 1200,
+        force = 50, 
+        box.padding = 0.1, 
+        point.padding = 0,
+        max.overlaps = Inf,
+        segment.size = 0.3,
+        segment.alpha = 0.7,
+        min.segment.length = unit(0, "lines")
+    ) +
+    scale_color_identity() + 
+    theme(
+        text = element_text(face = "bold", colour = "black", size = 6),
+        legend.position = "none"
+    )
+
+dyn
+
+
+
+
+
+
+
+
+# convert NA's and log2 transform the sample columns
+forlog2 <- raw_unique_renamed[5:28]
+log2_df <- apply(forlog2, 2, function(x) {
+    x <- suppressWarnings(as.numeric(x))
+    ifelse(!is.na(x) & x > 0, log2(x), NA)})
+rownames(log2_df) <- rownames(forlog2)
+
+graphics::boxplot(log2_df)
+
+
+
+
+
+
+# left_join
+log2m <- as.data.frame(log2_df)
+log2m$Gene <- rownames(log2m)
+
+merged_data <- log2m %>%
+    pivot_longer(cols = -Gene, names_to = "Sample_ID", values_to = "log2_Intensity") %>%  
+    left_join(PostIP_metadata, by = "Sample_ID") %>%
+    mutate(Intensity = ifelse(log2_Intensity == 0, NA, log2_Intensity))  
+
+
+
+
+merged_data$GroupTimepoint <- paste(merged_data$Group, merged_data$Timepoint, sep = "")
+color_fill <- c("Pre" = "white", "Post" = "mistyrose")
+color_groups <- c("Lean" = "deepskyblue4", "Obese" = "purple4", "T2D" = "maroon3")
+merged_data$GroupTimepoint <- factor(
+    merged_data$GroupTimepoint, 
+    levels = c("LeanPre", "LeanPost", "ObesePre", "ObesePost", "T2DPre", "T2DPost")
+)
+
+
+
+
+
+
+pca_input <- merged_data %>%
+    dplyr::select(Gene, Sample_ID, log2_Intensity, Group, Timepoint) %>%  
+    group_by(Gene, Sample_ID) %>%
+    summarise(log2_Intensity = mean(log2_Intensity, na.rm = TRUE), .groups = "drop") %>%  
+    pivot_wider(names_from = Sample_ID, values_from = log2_Intensity) %>%  
+    column_to_rownames("Gene") 
+
+metadata_pca <- merged_data %>%
+    dplyr::select(Sample_ID, Group, Timepoint) %>%
+    distinct()  
+pca_input <- pca_input[complete.cases(pca_input), ]
+
+pca_transposed <- as.data.frame(t(pca_input))
+pca_object <- prcomp(pca_transposed, scale = FALSE, center = TRUE)
+data_pca <- as.data.frame(pca_object$x) %>%
+    dplyr::select(PC1, PC2)  
+data_pca$Sample_ID <- rownames(data_pca)
+data_pca <- data_pca %>%
+    inner_join(metadata_pca, by = "Sample_ID") 
+
+pca_ID <- ggplot(
+    data_pca,
+    aes(
+        x = PC1,
+        y = PC2,
+        label = Sample_ID,
+        color = Timepoint, 
+        shape = Group  
+    )
+) +
+    geom_point(size = 3) +
+    theme_light() +
+    ggtitle("PCA - log2") +
+    geom_text(aes(label = Sample_ID), vjust = -0.5, hjust = 0.5, size = 3, color = "black")
+
+plotly::ggplotly(pca_ID)
+
+# Eigenvalues
+fviz_eig(pca_object, addlabels = TRUE) +
+    theme_light() +
+    ggtitle("Eigenvalues")
+# 18.4%, 12%
+
+
+
+
+
+
+
+
+
+############# LIMMA 
+
+expr_postIP <- merged_data %>%
+  dplyr::select(Gene, Sample_ID, log2_Intensity) %>%
+  pivot_wider(names_from = Sample_ID, values_from = log2_Intensity) %>%
+  column_to_rownames("Gene") %>%
+  as.matrix()
+
+meta_postIP <- PostIP_metadata %>% filter(Sample_ID %in% colnames(expr_postIP)) %>% arrange(match(Sample_ID, colnames(expr_postIP)))
+
+design_postIP <- model.matrix(~ 0 + Group + Timepoint, data = meta_postIP)
+
+corfit_postIP <- duplicateCorrelation(expr_postIP, design_postIP, block = meta_postIP$Participant)
+
+fit_postIP <- lmFit(expr_postIP, design_postIP, block = meta_postIP$Participant, correlation = corfit_postIP$consensus)
+
+fit2_postIP <- eBayes(fit_postIP)
+
+table_MainEffect_Training_postIP <- topTable(fit2_postIP, coef = 4, number = Inf, adjust = "fdr")
+table_MainEffect_Training_postIP$Protein <- rownames(table_MainEffect_Training_postIP)
+
+
+################################## FIGURE S5I ##############################
+
+
+
+
+selected_genes <- c("PRKAA1", "PRKAA2", "PRKAB1", "PRKAB2", "PRKAG1", "PRKAG2", "PRKAG3")
+
+boxplot_data_s <- merged_data %>%
+    filter(Gene %in% selected_genes)
+
+
+
+plot_boxplot2 <- function(data, title) {
+  data$Timepoint <- factor(data$Timepoint, levels = c("Pre", "Post"))
+  
+  ggplot(data, aes(x = Timepoint, y = log2_Intensity, fill = Timepoint)) +
+    geom_boxplot(outlier.size = 0.01, size = 0.2, fatten = 0.8, color = "black", width = 0.6) +
+
+    geom_point(aes(color = Group), size = 0.8, alpha = 0.6,
+               position = position_jitter(width = 0.1)) +
+
+    geom_line(aes(group = Participant, color = Group), size = 0.2, alpha = 0.5) +
+    
+    facet_wrap(~ Gene, scales = "free_y", ncol = 1) +
+    
+    labs(title = title, x = "", y = "Log2 Expression") +
+    
+    scale_fill_manual(values = color_fill) +
+    scale_color_manual(values = color_groups) +
+    
+    #coord_cartesian(ylim = c(15, 27)) +
+    theme_classic() +
+    theme(
+      legend.position = "none",
+      axis.title.x = element_blank(),
+      axis.text.x = element_text(size = 6),
+      strip.text = element_text(size = 6),
+      text = element_text(size = 6),
+      axis.title = element_text(size = 6),
+      axis.text = element_text(size = 6),
+      plot.title = element_text(size = 6, face = "bold")
+    )
+}
+
+plot_s <- plot_boxplot2(boxplot_data_s, "s")
+plot_s
+
+
+
+```
+
+

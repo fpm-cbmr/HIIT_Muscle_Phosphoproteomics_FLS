@@ -1,0 +1,346 @@
+---
+title: "Multi_Tissue_Omics_integration"
+author: "FLS"
+format: html
+---
+
+```{r setup}
+source(here::here("libraries.R"))
+
+
+
+########## load the datasets
+# skeletal muscle gloal proteome from this study
+#load(here::here("data/proteome_dataset.rda"))
+
+# skeletal muscle phosphoproteome from this study
+#load(here::here("data/phospho_dataset.rda"))
+
+# white adipose tissue proteome from Larsen et al.
+#load(here::here("data/WAT_filter50_batch_df.rda"))
+
+# plasma proteome from Kurgan et al.
+# load(here::here("data/plasma_forMOFA.rda"))
+
+# metadata
+# clinical data
+
+```
+
+
+```{r unify tissue proteomic datasets}
+
+## colnames
+Rename_ordered <- Rename[match(colnames(proteome_dataset), Rename$Sample_ID), ]
+muscle_proteome <- proteome_dataset
+matched_indices <- match(colnames(muscle_proteome), Rename_ordered$Sample_ID)
+colnames(muscle_proteome)[!is.na(matched_indices)] <- Rename_ordered$Group_Time_Cond_Participant[matched_indices[!is.na(matched_indices)]]
+
+Info_ordered <- Info[match(colnames(phospho_dataset), Info$label), ]
+muscle_phospho <- phospho_dataset
+matched_indices <- match(colnames(muscle_phospho), Info_ordered$label)
+colnames(muscle_phospho)[!is.na(matched_indices)] <- Info_ordered$Group_Time_Cond_Participant[matched_indices[!is.na(matched_indices)]]
+
+# for MOFA
+muscle_proteome_forMOFA <- muscle_proteome
+phospho_forMOFA <- muscle_phospho
+
+```
+
+```{r protein overlap between muscle WAT and Plasma}
+
+######################### FIGURE 5B ################################
+
+proteins_muscle <- rownames(proteome_dataset)
+proteins_WAT <- rownames(WAT_filter50_batch_df)
+proteins_plasma <- rownames(plasma_forMOFA)
+
+venn_data <- list(
+  Muscle = proteins_muscle,
+  WAT = proteins_WAT,
+  Plasma = proteins_plasma
+)
+
+fit <- euler(venn_data)
+
+p<- plot(fit,
+     fills = c("skyblue", "beige", "violet"),
+     alpha = 0.5,
+     quantities = TRUE,
+     main = "Overlap of Proteins")
+p
+
+
+```
+
+
+
+```{r MDS clinical data}
+
+############################### FIGURE 5A ####################################
+## load meta data
+rownames(meta_forMOFA) <- meta_forMOFA$Group_Time_Cond_Participant
+
+clin_var <- c("Age", "BMI", "FFM", "FM", "VO2max_kg", "Mvalue", "HbA1c", "TG")
+
+common_samples <- intersect(rownames(meta_forMOFA), 
+                           intersect(colnames(muscle_proteome_forMOFA), 
+                                     intersect(colnames(WAT_proteome_forMOFA), 
+                                               colnames(plasma_forMOFA))))
+
+meta_forMOFA <- meta_forMOFA[common_samples, ]
+rownames(meta_forMOFA) <- meta_forMOFA$Group_Time_Cond_Participant
+
+# Clinical data scaling and MDS
+clin_mds <- meta_forMOFA %>% dplyr::select(any_of(clin_var))
+rownames(clin_mds) <- rownames(meta_forMOFA)
+clin_scale <- scale(clin_mds)
+
+# MDS calculation
+dist_clin <- dist(clin_scale)
+mds_clin <- as.data.frame(cmdscale(dist_clin, k = 2))
+colnames(mds_clin) <- c("Dim1", "Dim2")
+mds_clin <- cbind(mds_clin, clin_scale)
+
+# Correlation with MDS dimensions
+cor_df_clin <- clin_scale %>%
+  as.data.frame() %>%
+  summarise(across(everything(), list(
+    Dim1 = ~ cor(.x, mds_clin$Dim1, method = "pearson"),
+    Dim2 = ~ cor(.x, mds_clin$Dim2, method = "pearson")
+  ))) %>%
+  pivot_longer(everything(), names_to = "key", values_to = "value") %>%
+  separate(key, into = c("Variable", "Dim"), sep = "_Dim") %>%
+  pivot_wider(names_from = Dim, values_from = value)
+
+cor_df_clin <- cor_df_clin %>%
+  dplyr::rename(Dim1 = `1`, Dim2 = `2`) %>%
+  mutate(Dim1 = as.numeric(Dim1), Dim2 = as.numeric(Dim2))
+
+scaling_factor <- 2  
+cor_df_clin <- cor_df_clin %>%
+  mutate(Dim1 = Dim1 * scaling_factor, Dim2 = Dim2 * scaling_factor)
+
+meta_forMOFA$Group_Time <- paste(meta_forMOFA$Group, meta_forMOFA$TimeCond, sep="_")
+
+mds_clin$Group_Time <- meta_forMOFA$Group_Time[match(rownames(mds_clin), meta_forMOFA$Group_Time_Cond_Participant)]
+mds_clin$Participant <- meta_forMOFA$Participant[match(rownames(mds_clin), meta_forMOFA$Group_Time_Cond_Participant)]
+
+mds_clin <- mds_clin %>% arrange(Participant, Group_Time)
+
+plot_mds_clin <- ggplot() +
+  geom_line(data = mds_clin, 
+            aes(x = Dim1, y = Dim2, group = Participant, color = Group_Time), 
+            size = 0.5, alpha = 0.2) + 
+  geom_point(data = mds_clin, 
+             aes(x = Dim1, y = Dim2, color = Group_Time), 
+             size = 1, alpha = 0.5) +   
+  geom_segment(data = cor_df_clin,
+               aes(x = 0, y = 0, xend = Dim1, yend = Dim2),
+               arrow = arrow(length = unit(0.2, "cm")), 
+               color = "black", alpha = 1) +  
+  geom_text(data = cor_df_clin, 
+            aes(x = Dim1, y = Dim2, label = Variable),
+            size = 2, vjust = -0.5, hjust = 0.5, 
+            color = "black", fontface="bold", alpha = 1) + 
+  labs(title = "MDS plot of Clinical Variables",
+       x = "Dimension 1",
+       y = "Dimension 2") +
+  theme_minimal() +
+  scale_color_manual(values = c("T2D_PreBasal" = "violet", 
+                                "T2D_PostBasal" = "magenta4",
+                                "Obese_PreBasal" = "mediumpurple1",
+                                "Obese_PostBasal" = "purple4",
+                                "Lean_PreBasal" = "skyblue1",
+                                "Lean_PostBasal" = "deepskyblue4")) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey", alpha = 0.5)
+
+print(plot_mds_clin)
+
+
+```
+
+
+```{r MOFA2}
+
+
+MOFAdatasets <- list(
+  muscle_proteome_forMOFA,
+  WAT_proteome_forMOFA,
+  plasma_forMOFA,
+  phospho_forMOFA
+)
+
+common_columns <- Reduce(intersect, lapply(MOFAdatasets, colnames))
+# 81 columns (just basal samples, pre and post HIIT)
+
+muscle_ordered <- muscle_proteome_forMOFA[, common_columns, drop = FALSE]
+WAT_ordered <- WAT_proteome_forMOFA[, common_columns, drop = FALSE]
+plasma_ordered <- plasma_forMOFA[, common_columns, drop = FALSE]
+phospho_ordered <- phospho_forMOFA[, common_columns, drop = FALSE]
+
+
+data_list <- list(
+    Muscle = as.matrix(muscle_ordered),
+    Phospho = as.matrix(phospho_ordered),
+    WAT = as.matrix(WAT_ordered),
+    Plasma = as.matrix(plasma_ordered)
+)
+
+
+mofa_object <- create_mofa(data_list)
+
+
+# default model options
+model_opts <- get_default_model_options(mofa_object)
+
+# Set training options
+train_opts <- get_default_training_options(mofa_object)
+train_opts$maxiter <- 1000
+
+# default data options
+data_opts <- get_default_data_options(mofa_object)
+data_opts$scale_views <- TRUE  # Standardizes features 
+
+# Prepare the object with all options
+mofa_object <- prepare_mofa(
+  object = mofa_object,
+  model_options = model_opts,
+  training_options = train_opts,
+  data_options = data_opts
+)
+
+set.seed(123)
+
+# Run MOFA
+trained_mofa <- run_mofa(mofa_object, use_basilisk = TRUE)
+
+
+## add metadata
+# Step 1: Extract sample names from MOFA object
+mofa_samples <- samples_metadata(trained_mofa)$sample
+# Step 2: Create metadata frame
+meta_df <- data.frame(sample = mofa_samples)
+# Step 3: Make sure Sample_ID in meta is character
+sample_metadata <- Rename[Rename$Group_Time_Cond_Participant %in% common_columns, ]
+# 81
+# Step 4: Join MOFA sample names with Rename_basal
+meta_df_joined <- left_join(meta_df, sample_metadata, by = c("sample" = "Group_Time_Cond_Participant"))
+# Step 4.5: add clinical and metadata
+meta_df_joined <- left_join(meta_df_joined, meta_forMOFA, by = c("sample" = "Group_Time_Cond_Participant"))
+# Step 5: Set rownames to match sample names (required for MOFA)
+rownames(meta_df_joined) <- meta_df_joined$sample
+# Step 6: Assign metadata to MOFA object
+samples_metadata(trained_mofa) <- meta_df_joined
+
+
+
+
+# Save the trained MOFA model and reload the same model next times
+#saveRDS(trained_mofa, file = here::here("data/trained_mofa_model.rds"))
+trained_mofa <- readRDS(here::here("data/trained_mofa_model.rds"))
+
+
+
+
+
+
+############################## FIGURE 5C ##############################################
+
+p <- plot_variance_explained(trained_mofa, x = "view", y = "factor", transpose = TRUE) +
+  scale_y_discrete(limits = rev) +  
+  labs(x = "Omics Layer", y = "MOFA Factor")
+print(p)
+
+
+
+
+################################# FIGURE 5F ###################################
+trainingplot <- plot_factors(trained_mofa, 
+             factors = 6:8,       
+             color_by = "Timepoint",    
+             dot_size = 1)
+
+############################## FIGURE S5B #####################################
+all_training <- plot_factors(trained_mofa, 
+             factors = 1:10,         
+             color_by = "Timepoint",    
+             dot_size = 1)
+
+################################ FIGURE 5E #################################
+groupplot <-plot_factors(trained_mofa, 
+             factors = c(2,4,5,10),        
+             color_by = "Group.x",    
+             dot_size = 1)
+
+################################ FIGURE S5A ##################################
+all_group <- plot_factors(trained_mofa, 
+             factors = 1:10,        
+             color_by = "Group.x",     
+             dot_size = 1)
+
+
+############################ FIGURE 5D ########################################
+clincor<-correlate_factors_with_covariates(trained_mofa, covariates = c("Mvalue", 
+                                                               "VO2max_kg",
+                                                               "Age",
+                                                               "FM",
+                                                               "FFM", 
+                                                               "BMI",
+                                                               "TG1",
+                                                               "HbA1c"
+                                                              ),
+                                  factors = 1:10)
+
+
+
+
+################################ FIGURE 5G #######################################
+p1<- plot_weights(trained_mofa, view = "Muscle", factor = 7, nfeatures = 10)
+
+
+
+
+
+
+# Extract weights 
+weights_list <- get_weights(
+  trained_mofa,
+  views = "WAT",
+  factors = 10,
+  abs = FALSE,
+  scale = FALSE,
+  as.data.frame = FALSE
+)
+
+weights_vec <- weights_list[[1]]  
+top_weights <- tibble(
+  Feature = names(weights_vec),
+  Weight = weights_vec
+) %>%
+  arrange(desc(abs(Weight))) %>%
+  mutate(Rank = row_number()) %>%
+  slice(1:20)
+
+
+
+# Get weights for all views and all factors
+all_weights <- get_weights(trained_mofa, as.data.frame = TRUE)
+#  Filter to only the first 10 factors
+all_weights_filtered <- all_weights %>%
+  filter(factor %in% paste0("Factor", 1:10))
+
+# Add rank per (view, factor) based on absolute weight
+all_weights_ranked <- all_weights_filtered %>%
+  group_by(view, factor) %>%
+  arrange(desc(abs(value))) %>%
+  mutate(rank = row_number()) %>%
+  ungroup()
+
+### Supplementary table 
+#write_xlsx(all_weights_ranked, here::here("data", "MOFA_factors.xlsx"))
+
+
+```
+
