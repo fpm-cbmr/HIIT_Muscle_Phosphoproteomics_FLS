@@ -16,10 +16,10 @@ source(here::here("libraries.R"))
 # skeletal muscle phosphoproteome from this study
 #load(here::here("data/phospho_dataset.rda"))
 
-# white adipose tissue proteome from Larsen et al.
+# white adipose tissue proteome from Kjærgaard et al.
 #load(here::here("data/WAT_filter50_batch_df.rda"))
 
-# plasma proteome from Kurgan et al.
+# plasma proteome
 # load(here::here("data/plasma_forMOFA.rda"))
 
 # metadata
@@ -201,9 +201,8 @@ train_opts$maxiter <- 1000
 
 # default data options
 data_opts <- get_default_data_options(mofa_object)
-data_opts$scale_views <- TRUE  # Standardizes features 
+data_opts$scale_views <- TRUE  
 
-# Prepare the object with all options
 mofa_object <- prepare_mofa(
   object = mofa_object,
   model_options = model_opts,
@@ -218,20 +217,20 @@ trained_mofa <- run_mofa(mofa_object, use_basilisk = TRUE)
 
 
 ## add metadata
-# Step 1: Extract sample names from MOFA object
+# extract sample names from MOFA object
 mofa_samples <- samples_metadata(trained_mofa)$sample
-# Step 2: Create metadata frame
+# metadata frame
 meta_df <- data.frame(sample = mofa_samples)
-# Step 3: Make sure Sample_ID in meta is character
+# make sure Sample_ID in meta is character
 sample_metadata <- Rename[Rename$Group_Time_Cond_Participant %in% common_columns, ]
 # 81
-# Step 4: Join MOFA sample names with Rename_basal
+# join MOFA sample names with Rename_basal
 meta_df_joined <- left_join(meta_df, sample_metadata, by = c("sample" = "Group_Time_Cond_Participant"))
-# Step 4.5: add clinical and metadata
+#  add clinical and metadata
 meta_df_joined <- left_join(meta_df_joined, meta_forMOFA, by = c("sample" = "Group_Time_Cond_Participant"))
-# Step 5: Set rownames to match sample names (required for MOFA)
+# rownames to match sample names (required for MOFA)
 rownames(meta_df_joined) <- meta_df_joined$sample
-# Step 6: Assign metadata to MOFA object
+# assign metadata to MOFA object
 samples_metadata(trained_mofa) <- meta_df_joined
 
 

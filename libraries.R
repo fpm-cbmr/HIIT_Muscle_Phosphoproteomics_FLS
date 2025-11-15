@@ -53,8 +53,9 @@ library(funscoR)
 library(gridExtra)
 library(patchwork)
 library(VennDiagram)
+library(MOFA2)
 
 
-
+#renv::snapshot()
 
 

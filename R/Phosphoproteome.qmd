@@ -23,7 +23,7 @@ ncol(raw)
 # 189
 
 # meta data
-Info <- read_excel(here::here("data-raw/Info.xlsx"))
+#Info <- read_excel(here::here("data-raw/Info.xlsx"))
 
 column_order <- colnames(phospho_dataset)
 column_indices <- match(column_order, Info$label)
@@ -370,8 +370,9 @@ print(paste("Mean correlation:", mean_corr))
 
 ```{r SPSs normalization}
 
-# load the SPSs dataset from PhosR Reference***
-SPSs <- read_excel(here::here("data-raw/SPSs_for_correction_sentbyJeppe.xlsx"))
+# load the SPSs dataset from PhosR reference Kim et al
+#eg
+#SPSs <- read_excel(here::here("data-raw/SPSs_for_correction_sentby.xlsx"))
 colnames(SPSs) <- "SPsite"
 SPSs$SPsite <- substr(SPSs$SPsite, 1, nchar(SPSs$SPsite) - 1)
 SPSs$SPsite <- gsub(";", "_", SPSs$SPsite)
@@ -545,6 +546,7 @@ phospho_dataset <- as.data.frame(assay(PhosphoSE_BB))
 
 ```{r QC batch corrected data}
 
+#for ease
 df <- phospho_dataset
 
 ########################### FIGURE 1J & FIGURE S1E ###########################
@@ -1944,7 +1946,7 @@ plots <- boxplots(Sites = sites, data = InputNorm_wide_filter, Info = Info)
 ############################# KINASE ENRICHMENT ANALYSIS = KEA #########################
 
 
-```{r}
+```{r KEA}
 
 ### load in the UniProt data
 

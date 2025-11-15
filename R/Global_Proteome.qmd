@@ -1622,8 +1622,8 @@ unique_downregulated <- list(
   T2D = setdiff(downregulated$T2D, c(downregulated$Lean, downregulated$Obese))
 )
 
-# === Step 2: ORA Analysis ===
-# Function to perform ORA
+
+# ORA
 perform_ORA <- function(gene_list, universe_genes, ontology = "ALL") {
   if (length(gene_list) == 0) return(NULL)  # Skip if list is empty
 
@@ -1663,7 +1663,7 @@ ora_downregulated <- list(
   T2D = perform_ORA(unique_downregulated$T2D, gene_universe)
 )
 
-# === Step 3: Plot ORA Results ===
+# 
 
 # Function to extract ORA results as a dataframe
 extract_ora_df <- function(ora_result) {
@@ -2937,14 +2937,14 @@ heatmap <- pheatmap::pheatmap(
 ```
 
 
-```{r Mvalue correlated to HIIT-logFC - CORRECT HERE XXXXXXXXXXXXXXXXXXXXXXXXXXXx}
+```{r Mvalue correlated to HIIT-logFC }
 
-### load clinical data
+### load finltered clinical data
 ## only basal samples
-clin_filt <- clin[complete.cases(clin),]
+#clin_filt <- clin[complete.cases(clin),]
 
-Rename_basal <- Rename %>%
-    filter(Condition == "Basal")
+#Rename_basal <- Rename %>%
+ #   filter(Condition == "Basal")
 
 proteome_dataset_basal <- proteome_dataset[, colnames(proteome_dataset) %in% Rename_basal$Sample_ID]
 
@@ -2955,32 +2955,28 @@ Rename_basal_ordered <- Rename_basal[match(colnames(proteome_dataset_basal), Ren
 
 
 
-
-
-# Step 1: Subset PreBasal clinical data
 clin_filt_pre <- clin_filt_ordered %>% 
   filter(TimeCond == "PreBasal")
 
-# Step 2: Keep only samples that exist in the expression data
+# only samples that exist inproteome data
 valid_pre_ids <- intersect(clin_filt_pre$Sample_ID, colnames(proteome_dataset_basal))
 clin_filt_pre <- clin_filt_pre %>% filter(Sample_ID %in% valid_pre_ids)
 
-# Step 3: Subset expression matrix using valid Sample_IDs
 proteome_dataset_basal_pre <- proteome_dataset_basal[, valid_pre_ids]
 
-# Step 4: Reorder clin_filt_pre to match expression column order
+# reorder
 clin_filt_pre <- clin_filt_pre[match(colnames(proteome_dataset_basal_pre), clin_filt_pre$Sample_ID), ]
 
-# Step 5: Sanity check
+# just sanity check
 stopifnot(all(clin_filt_pre$Sample_ID == colnames(proteome_dataset_basal_pre)))
 
-# Step 6: Combine Mvalue and expression data
+#  Mvalue and proteomics data
 cor_data_pre <- cbind(
   Mvalue = clin_filt_pre$Mvalue,
   t(proteome_dataset_basal_pre)
 )
 
-# Step 7: Pearson correlation loop
+# loop pearson correlation
 results_pre <- list()
 row_index <- 1
 
@@ -2991,7 +2987,7 @@ for (i in 2:ncol(cor_data_pre)) {
 
   test <- cor.test(
     x = cor_data_pre[, 1],  # M-value
-    y = cor_data_pre[, i],  # Protein expression
+    y = cor_data_pre[, i],  # Proteinintensity
     method = "pearson",
     use = "pairwise.complete.obs"
   )
@@ -3004,7 +3000,7 @@ for (i in 2:ncol(cor_data_pre)) {
   row_index <- row_index + 1
 }
 
-# Step 8: Compile and format results
+
 cor_pre_df <- do.call(rbind, results_pre) %>% as.data.frame()
 cor_pre_df$coefficient <- as.numeric(cor_pre_df$coefficient)
 cor_pre_df$p_value <- as.numeric(cor_pre_df$p_value)
@@ -3087,12 +3083,12 @@ p
 ```
 
 
-```{r Correlation: insulin sensitivy and HIIT-response}
+```{r Correlation: insulin sensitivy (Kjærgaard et al) and HIIT-response}
 
 ###################### FIGURE 3E #################################
 
 
-## load Mvalue correlation data from Larsen et al., supplementary table S6
+## load Mvalue correlation data from Kjærgaard et al (here "Larsen"), supplementary table S6
 
 Larsen_cor_proteins <- Larsen_cor$Gene_name
 # 2974
@@ -3185,7 +3181,7 @@ print(significant_counts)
 ```{r Overrepresented GWAS traits}
 
 
-#### load GWAS data, eg:
+#### load donwloaded GWAS data, eg:
 # GWAS <- read.delim(here::here("data-raw/gwas_catalog_v1.0-associations_e112_r2024-05-20.tsv"), header = TRUE, quote = "")
 
 # background: all proteins in proteomics dataset
@@ -3219,7 +3215,7 @@ for (trait in unique(GWAS$DISEASE.TRAIT)) {
         Overlap = overlap,
         p.value = fisher$p.value,
         OddsRatio = fisher$estimate,
-        Proteins = paste(overlapping_proteins, collapse = ";")  # <-- Add this line
+        Proteins = paste(overlapping_proteins, collapse = ";")  
     )
 }
 
@@ -3306,7 +3302,7 @@ rownames(peptides_DIA) <- peptides$EG.PrecursorId
 peptides_DIA <- peptides_DIA[, 19:182]
 
 
-# remove outlier sample as identified in proteome analysis
+# remove same outlier sample as identified in proteome analysis
 print(colnames(peptides_DIA))
 column_to_remove <- c("X.38..20231115_PRI_TIMS5_NEO4_X1285_P276_R1051_101min_DIA_S38_B.D2_1_8479.d.EG.TotalQuantity..Settings.")
 peptides_DIA <- peptides_DIA[, !colnames(peptides_DIA) %in% column_to_remove, drop = FALSE]
