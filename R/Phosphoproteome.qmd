@@ -1996,13 +1996,11 @@ topTable_reordered$window[which(str_length(topTable_reordered$window) == 18)] <-
 foreground_training_proteomeNONE <- topTable_reordered %>%
     filter(Proteome_regulation == "none" & Phospho_regulation != "none") %>%
     dplyr::select(window)
-# 234
 
 # Clamp
 foreground_clamp <- topTable_reordered %>%
     filter(adj.P.Val < 0.05) %>%
     dplyr::select(window)
-# 208 
 
 ### background data (all windows) 
 background_data <- as.data.frame(topTable_reordered$window)
